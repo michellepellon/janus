@@ -1,0 +1,54 @@
+#!/usr/bin/env ruby
+# ABOUTME: Starts the dashboard web server (rackup/puma) bound to 127.0.0.1.
+# ABOUTME: Loads .env; the port comes from JANUS_PORT (default 8367).
+
+ROOT = File.expand_path("..", __dir__)
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~USAGE
+    Usage: bin/server
+
+    Starts the Janus home-climate dashboard on http://127.0.0.1:${JANUS_PORT:-8367}.
+
+    Configuration is read from #{File.join(ROOT, ".env")} (see .env.example):
+      SENSORPUSH_USERNAME / SENSORPUSH_PASSWORD  enable background collection
+      JANUS_DB_PATH                              DuckDB file (default data/janus.duckdb)
+      JANUS_PORT                                 listen port (default 8367)
+      JANUS_POLL_SECONDS                         collection interval (default 300)
+      JANUS_COLLECT=off                          serve without collecting
+
+    The server is the single writer of the DuckDB file; stop it before
+    running bin/collect.
+  USAGE
+  exit 0
+end
+
+bundle = ENV["PATH"].split(File::PATH_SEPARATOR)
+                    .map { |dir| File.join(dir, "bundle") }
+                    .find { |path| File.file?(path) && File.executable?(path) }
+if bundle.nil?
+  warn "bin/server: `bundle` not found on PATH."
+  warn "Install bundler (`gem install bundler`) or add it to PATH, then retry."
+  exit 1
+end
+
+# Re-exec under `bundle exec` so dotenv and the app gems resolve from the
+# project bundle regardless of how this script was invoked.
+if ENV["JANUS_BUNDLED"] != "1"
+  ENV["JANUS_BUNDLED"] = "1"
+  ENV["BUNDLE_GEMFILE"] = File.join(ROOT, "Gemfile")
+  exec(bundle, "exec", RbConfig.ruby, __FILE__, *ARGV)
+end
+
+begin
+  require "dotenv"
+rescue LoadError => e
+  warn "bin/server: #{e.message}"
+  warn "Run `bundle install` in #{ROOT} first."
+  exit 1
+end
+Dotenv.load(File.join(ROOT, ".env"))
+
+port = ENV.fetch("JANUS_PORT", "8367")
+Dir.chdir(ROOT)
+exec(bundle, "exec", "rackup", "-o", "127.0.0.1", "-p", port, "config.ru")

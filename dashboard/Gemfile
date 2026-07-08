@@ -1,0 +1,19 @@
+# ABOUTME: Gem dependencies for the Janus home-climate dashboard backend.
+# ABOUTME: Sinatra app + DuckDB storage + SensorPush client; minitest for tests.
+
+source "https://rubygems.org"
+
+ruby "~> 4.0"
+
+gem "sinatra", "~> 4"
+gem "rackup"
+gem "puma"
+gem "duckdb"
+gem "sensorpush"
+gem "dotenv"
+gem "rake"
+
+group :test do
+  gem "minitest"
+  gem "rack-test"
+end

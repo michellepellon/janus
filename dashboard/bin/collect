@@ -1,0 +1,114 @@
+#!/usr/bin/env ruby
+# ABOUTME: One-shot SensorPush and NWS weather collection/backfill into the
+# ABOUTME: dashboard DuckDB. Configured via .env; the server must be stopped first.
+
+ROOT = File.expand_path("..", __dir__)
+
+require "optparse"
+
+backfill_days = 30
+parser = OptionParser.new do |opts|
+  opts.banner = <<~BANNER
+    Usage: bin/collect [options]
+
+    Fetches SensorPush sensors and samples once and stores them in the
+    dashboard DuckDB file (JANUS_DB_PATH, default data/janus.duckdb).
+    When JANUS_OUTSIDE_STATION is set, also backfills outside-air readings
+    from that NWS station (the NWS keeps 7 days of observations).
+    Configuration comes from #{File.join(ROOT, ".env")} (see .env.example).
+
+    DuckDB allows one writer at a time — stop the dashboard server
+    (bin/server) before running this.
+  BANNER
+  opts.on("--backfill-days N", Integer,
+          "Days of SensorPush history to fetch for sensors with no stored readings (default 30)") do |n|
+    backfill_days = n
+  end
+  opts.on("-h", "--help", "Show this help") do
+    puts opts
+    exit 0
+  end
+end
+
+begin
+  parser.parse!
+rescue OptionParser::ParseError => e
+  warn "bin/collect: #{e.message}"
+  warn parser
+  exit 1
+end
+
+# Re-exec under `bundle exec` so dotenv and the app gems resolve from the
+# project bundle regardless of how this script was invoked.
+if ENV["JANUS_BUNDLED"] != "1"
+  bundle = ENV["PATH"].split(File::PATH_SEPARATOR)
+                      .map { |dir| File.join(dir, "bundle") }
+                      .find { |path| File.file?(path) && File.executable?(path) }
+  if bundle.nil?
+    warn "bin/collect: `bundle` not found on PATH."
+    warn "Install bundler (`gem install bundler`) or add it to PATH, then retry."
+    exit 1
+  end
+  ENV["JANUS_BUNDLED"] = "1"
+  ENV["BUNDLE_GEMFILE"] = File.join(ROOT, "Gemfile")
+  exec(bundle, "exec", RbConfig.ruby, __FILE__, *ARGV)
+end
+
+begin
+  require "dotenv"
+rescue LoadError => e
+  warn "bin/collect: #{e.message}"
+  warn "Run `bundle install` in #{ROOT} first."
+  exit 1
+end
+Dotenv.load(File.join(ROOT, ".env"))
+
+username = ENV["SENSORPUSH_USERNAME"].to_s
+password = ENV["SENSORPUSH_PASSWORD"].to_s
+station = ENV["JANUS_OUTSIDE_STATION"].to_s
+sensorpush_configured = !username.empty? && !password.empty?
+if !sensorpush_configured && station.empty?
+  warn "bin/collect: nothing to collect — neither SENSORPUSH_USERNAME/SENSORPUSH_PASSWORD nor JANUS_OUTSIDE_STATION is set."
+  warn "Copy .env.example to .env and fill in SensorPush credentials and/or an NWS station."
+  exit 1
+end
+
+$LOAD_PATH.unshift(File.join(ROOT, "lib"))
+require "sensorpush"
+require "janus/store"
+require "janus/collector"
+require "janus/weather"
+require "janus/weather_collector"
+
+Dir.chdir(ROOT)
+db_path = ENV.fetch("JANUS_DB_PATH", "data/janus.duckdb")
+begin
+  store = Janus::Store.new(path: db_path)
+rescue DuckDB::Error => e
+  if e.message.match?(/lock/i)
+    warn "bin/collect: the database #{db_path} is locked by another process."
+    warn "The dashboard server writes this file while it runs — stop bin/server, then retry."
+    exit 1
+  end
+  raise
+end
+
+if sensorpush_configured
+  client = Sensorpush.new(username: username, password: password)
+  unless client.authenticate
+    warn "bin/collect: SensorPush authentication failed — check the credentials in .env."
+    exit 1
+  end
+
+  result = Janus::Collector.new(client: client, store: store, backfill_days: backfill_days).run_once
+  puts "Sensors seen: #{result[:sensors]}"
+  puts "Readings inserted: #{result[:readings]}"
+end
+
+unless station.empty?
+  weather = Janus::Weather::Client.new(station: station)
+  result = Janus::WeatherCollector.new(weather: weather, store: store).run_once
+  puts "Outside (#{weather.sensor_id}): #{result[:readings]} readings"
+end
+
+store.close

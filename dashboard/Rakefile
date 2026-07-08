@@ -1,0 +1,26 @@
+# ABOUTME: Rake tasks for the dashboard; `rake` runs the Ruby unit/integration
+# ABOUTME: suite, `rake e2e` the live-server suite, `rake all` everything.
+
+require "rake/testtask"
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "test" << "lib"
+  t.test_files = FileList["test/**/*_test.rb"]
+    .exclude("test/frontend/**/*")
+    .exclude("test/e2e/**/*")
+end
+
+Rake::TestTask.new(:e2e) do |t|
+  t.libs << "test" << "lib"
+  t.test_files = FileList["test/e2e/**/*_test.rb"]
+end
+
+desc "Run the node-based frontend tests"
+task :frontend do
+  sh "node", "--test", *FileList["test/frontend/*_test.js"]
+end
+
+desc "Run every suite: unit/integration, e2e, frontend"
+task all: [:test, :e2e, :frontend]
+
+task default: :test

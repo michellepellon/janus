@@ -1,0 +1,341 @@
+/* ABOUTME: Tufte-inspired styling for the Janus climate dashboard — ink on cream,
+   serif type, hairline rules, and whitespace instead of boxes or chrome. */
+
+:root {
+  --page: #fffff8;
+  --ink: #111;
+  --secondary: #555;
+  --muted: #767668;
+  --hairline: #ddd;
+  --temp: #a63d2f;
+  --hum: #33689e;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #16150f;
+    --ink: #e8e6da;
+    --secondary: #b4b2a4;
+    --muted: #8f8d80;
+    --hairline: #3a382e;
+    --temp: #c4685a;
+    --hum: #5b92d4;
+  }
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { background: var(--page); }
+
+body {
+  font-family: Palatino, "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.wrap {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 2.75rem 2.5rem 5rem;
+}
+
+/* ---- header ---- */
+
+.masthead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+h1 {
+  font-size: 1.7rem;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+}
+
+.generated {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.generated .updatefail {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* ---- modules: each home domain (climate today; more join later) ---- */
+
+.module { margin-top: 1.7rem; }
+
+.module-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.module-title {
+  font-variant: small-caps;
+  letter-spacing: 0.09em;
+  font-weight: 400;
+  font-size: 1.05rem;
+  color: var(--secondary);
+}
+
+.presets {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.presets a {
+  color: var(--muted);
+  text-decoration: none;
+  padding-bottom: 1px;
+}
+
+.presets a:hover { color: var(--secondary); }
+
+.presets a.selected {
+  color: var(--ink);
+  border-bottom: 1px solid var(--muted);
+}
+
+.presets .sep { margin: 0 0.55rem; }
+
+header { border-bottom: 1px solid var(--hairline); padding-bottom: 1.1rem; }
+
+/* ---- sensors ---- */
+
+.sensor {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 3rem;
+  padding: 2.6rem 0 2.2rem;
+}
+
+.sensor + .sensor { border-top: 1px solid var(--hairline); }
+
+.meta .name {
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  font-weight: 400;
+  font-size: 1.05rem;
+  margin-bottom: 0.7rem;
+}
+
+.meta .big {
+  font-size: 44px;
+  font-weight: 400;
+  line-height: 1.05;
+  font-variant-numeric: proportional-nums;
+}
+
+.meta .humnow {
+  color: var(--secondary);
+  margin-top: 0.35rem;
+}
+
+.meta .battery {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.55rem;
+}
+
+.meta .note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-style: italic;
+  margin-top: 0.55rem;
+}
+
+.nodata {
+  color: var(--muted);
+  font-style: italic;
+  padding-top: 1.4rem;
+}
+
+/* ---- charts ---- */
+
+.charts { min-width: 0; }
+
+.chartwrap { position: relative; }
+
+/* The plot box hugs the SVG so percentage-positioned mark labels track chart
+   coordinates while keeping a fixed on-screen type size. */
+.plot { position: relative; }
+
+.plot .marklabel {
+  position: absolute;
+  font-size: 0.75rem;
+  line-height: 1;
+  color: var(--secondary);
+  white-space: nowrap;
+  pointer-events: none;
+  /* Page-colored halo keeps a label legible when clamping lands it on the line. */
+  text-shadow: 0 1px 0 var(--page), 0 -1px 0 var(--page),
+    1px 0 0 var(--page), -1px 0 0 var(--page);
+}
+
+.chartwrap + .chartwrap, .ticks + .chartwrap { margin-top: 1.1rem; }
+
+.key {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-bottom: 0.3rem;
+}
+
+.key .swatch {
+  display: inline-block;
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  touch-action: pan-y;
+}
+
+svg:focus-visible {
+  outline: 1px dotted var(--muted);
+  outline-offset: 6px;
+}
+
+.ticks {
+  position: relative;
+  height: 1.35em;
+  margin-top: 0.15rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.ticks .tick {
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+/* ---- readings table ---- */
+
+/* The disclosure reads as the quiet third element of the chart column:
+   temperature, humidity, readings. */
+.datatable { margin-top: 1.6rem; }
+
+.datatable summary {
+  color: var(--muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  width: max-content;
+  list-style: none;
+}
+
+.datatable summary::-webkit-details-marker { display: none; }
+
+.datatable summary::before {
+  content: "›";
+  display: inline-block;
+  margin-right: 0.4rem;
+  transition: transform 0.15s ease;
+}
+
+.datatable[open] summary::before { transform: rotate(90deg); }
+
+.datatable summary:hover { color: var(--secondary); }
+
+.datatable summary:focus-visible {
+  color: var(--secondary);
+  outline: 1px dotted var(--muted);
+  outline-offset: 6px;
+}
+
+.tablescroll {
+  width: max-content;
+  max-width: 100%;
+  max-height: 17.5rem; /* about ten rows plus the header */
+  overflow-y: auto;
+  overflow-x: auto;
+  margin-top: 0.6rem;
+  padding-right: 1rem;
+}
+
+.datatable[open] .tablescroll { animation: tablefade 0.2s ease; }
+
+@keyframes tablefade { from { opacity: 0; } }
+
+.datatable table {
+  /* separate (not collapse) so the sticky header keeps its border while rows scroll */
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.85rem;
+}
+
+.datatable th {
+  font-weight: 400;
+  color: var(--muted);
+  text-align: left;
+  position: sticky;
+  top: 0;
+  background: var(--page);
+}
+
+.datatable th, .datatable td {
+  padding: 0.15rem 0 0.15rem 2.2rem;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.datatable th:first-child, .datatable td:first-child { padding-left: 0; }
+
+.datatable .tcol { color: var(--secondary); }
+
+.datatable .ncol {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- states & overlays ---- */
+
+.message {
+  text-align: center;
+  color: var(--muted);
+  padding: 5rem 1rem;
+}
+
+#sensors { transition: opacity 0.25s ease; }
+
+#sensors.stale { opacity: 0.45; }
+
+.tooltip {
+  display: none;
+  position: absolute;
+  z-index: 10;
+  background: var(--page);
+  border: 1px solid var(--hairline);
+  padding: 0.2rem 0.55rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.tooltip .val { color: var(--ink); font-weight: 700; }
+
+.tooltip .time { color: var(--secondary); }
+
+/* ---- narrow screens ---- */
+
+@media (max-width: 719px) {
+  .wrap { padding: 1.8rem 1.2rem 3.5rem; }
+  .sensor {
+    grid-template-columns: 1fr;
+    gap: 1.4rem;
+    padding: 2rem 0 1.8rem;
+  }
+}
