@@ -88,7 +88,7 @@ class AppTest < Minitest::Test
     get "/api/dashboard"
     body = JSON.parse(last_response.body)
 
-    assert_equal %w[generated_at hours sensors], body.keys.sort
+    assert_equal %w[cooling generated_at hours sensors], body.keys.sort
     assert_match ISO8601_Z, body["generated_at"]
     assert_equal 24, body["hours"]
 
@@ -124,5 +124,72 @@ class AppTest < Minitest::Test
     assert_nil bedroom["latest"]
     assert_nil bedroom["range"]
     assert_equal [], bedroom["series"]
+  end
+
+  def test_cooling_is_null_without_an_outside_sensor
+    get "/api/dashboard"
+    body = JSON.parse(last_response.body)
+    assert body.key?("cooling")
+    assert_nil body["cooling"]
+  end
+
+  def test_cooling_reports_positive_differential_as_not_free_cooling
+    seed_outside(temperature: 95.0, humidity: 53.0) # hotter than the house
+    get "/api/dashboard"
+    cooling = JSON.parse(last_response.body).fetch("cooling")
+
+    now = cooling.fetch("now")
+    assert_equal 95.0, now["outside_temp"]
+    # House temp is the mean of each indoor sensor's latest reading; only s1
+    # has readings, so it is s1's latest.
+    assert_equal 21.3, now["house_temp"]
+    assert_in_delta 73.7, now["delta"]
+    assert_in_delta 75.2, now["dew_point"], 0.3
+    assert_equal false, now["free_cooling"]
+
+    series = cooling.fetch("series")
+    refute_empty series
+    assert_equal series.map { |p| p["t"] }.sort, series.map { |p| p["t"] }
+    series.each do |point|
+      assert_equal %w[delta t], point.keys.sort
+      assert_match ISO8601_Z, point["t"]
+      assert_equal point["delta"].round(1), point["delta"]
+    end
+  end
+
+  def test_cooling_flags_free_cooling_when_cooler_and_dew_point_comfortable
+    seed_outside(temperature: 15.0, humidity: 50.0) # cooler, dew point ~ -3F
+    get "/api/dashboard"
+    now = JSON.parse(last_response.body).dig("cooling", "now")
+    assert_operator now["delta"], :<, 0
+    assert_operator now["dew_point"], :<=, 63.0
+    assert_equal true, now["free_cooling"]
+  end
+
+  def test_cooling_denies_free_cooling_when_cooler_but_muggy
+    # Raise the house mean via s2 so outside air warm enough to be muggy
+    # (dew point cannot exceed air temperature) still reads as cooler.
+    @store.insert_readings("s2", [
+      Reading.new(observed: Time.now.utc - 300, temperature: 130.0, humidity: 40.0)
+    ])
+    seed_outside(temperature: 70.0, humidity: 90.0) # cooler than the mean, dew point ~ 66.9F
+    get "/api/dashboard"
+    now = JSON.parse(last_response.body).dig("cooling", "now")
+    assert_operator now["delta"], :<, 0
+    assert_operator now["dew_point"], :>, 63.0
+    assert_equal false, now["free_cooling"]
+  end
+
+  private
+
+  # Adds the Outside pseudo-sensor with readings aligned to s1's, so the
+  # differential series has overlapping buckets and a fresh "now".
+  def seed_outside(temperature:, humidity:)
+    @store.upsert_sensor(id: "nws.KEFD", name: "Outside", active: true, battery_percentage: nil)
+    now = Time.now.utc
+    @store.insert_readings("nws.KEFD", [
+      Reading.new(observed: now - 3600, temperature: temperature - 1.0, humidity: humidity),
+      Reading.new(observed: now - 300, temperature: temperature, humidity: humidity)
+    ])
   end
 end

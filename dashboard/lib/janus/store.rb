@@ -71,9 +71,7 @@ module Janus
     # bucket boundary so the series never exceeds MAX_SERIES_POINTS; buckets
     # containing no readings are omitted.
     def dashboard(hours:, now: Time.now.getutc)
-      now = now.getutc
-      bucket_minutes = (hours * 60.0 / MAX_SERIES_POINTS).ceil
-      window_start = aligned_window_start(now - (hours * 3600), bucket_minutes * 60)
+      bucket_minutes, window_start = bucket_window(hours, now.getutc)
 
       @mutex.synchronize do
         sensor_rows = @conn.query(<<~SQL).to_a
@@ -93,13 +91,78 @@ module Janus
       end
     end
 
+    # Outside-minus-indoor temperature series over the same window and buckets
+    # as +dashboard+: ascending [{t:, delta:}] where delta is the bucketed
+    # average outside temperature minus the bucketed average indoor
+    # temperature. Outside readings come from NWS pseudo-sensors
+    # (sensor_id LIKE 'nws.%'); everything else is indoor. Buckets missing
+    # either side are omitted.
+    def differential(hours:, now: Time.now.getutc)
+      bucket_minutes, window_start = bucket_window(hours, now.getutc)
+
+      @mutex.synchronize do
+        rows = @conn.query(<<~SQL, bucket_minutes, window_start, bucket_minutes, window_start).to_a
+          WITH outside AS (
+            SELECT #{BUCKET_SQL} AS bucket, avg(temperature) AS temp
+            FROM readings
+            WHERE sensor_id LIKE 'nws.%' AND observed >= ?
+            GROUP BY bucket
+          ),
+          -- The indoor bucket value is a plain AVG over every indoor reading
+          -- in the bucket, so rooms reporting more often weigh more; that is
+          -- accurate enough for a whole-house differential.
+          indoor AS (
+            SELECT #{BUCKET_SQL} AS bucket, avg(temperature) AS temp
+            FROM readings
+            WHERE sensor_id NOT LIKE 'nws.%' AND observed >= ?
+            GROUP BY bucket
+          )
+          SELECT outside.bucket, outside.temp - indoor.temp
+          FROM outside JOIN indoor ON outside.bucket = indoor.bucket
+          WHERE outside.temp IS NOT NULL AND indoor.temp IS NOT NULL
+          ORDER BY outside.bucket
+        SQL
+        rows.map { |(bucket, delta)| { t: as_utc(bucket), delta: delta } }
+      end
+    end
+
+    # Most recent outside (NWS pseudo-sensor) reading within the same window
+    # as +dashboard+, or nil when there is none.
+    def latest_outside(hours:, now: Time.now.getutc)
+      _, window_start = bucket_window(hours, now.getutc)
+
+      @mutex.synchronize do
+        row = @conn.query(<<~SQL, window_start).first
+          SELECT observed, temperature, humidity
+          FROM readings
+          WHERE sensor_id LIKE 'nws.%' AND observed >= ?
+          ORDER BY observed DESC
+          LIMIT 1
+        SQL
+        return nil if row.nil?
+
+        { observed: as_utc(row[0]), temperature: row[1], humidity: row[2] }
+      end
+    end
+
     def close
       @conn.disconnect
       @db.close
       nil
     end
 
+    # The time_bucket expression shared by every bucketed query; the origin
+    # literal must match BUCKET_ORIGIN.
+    BUCKET_SQL = "time_bucket(to_minutes(CAST(? AS INTEGER)), observed, TIMESTAMP '2000-01-01 00:00:00')"
+
     private
+
+    # Bucket width (minutes) and aligned window start for an hours-long window
+    # ending at now — the one bucketing scheme every windowed query shares.
+    def bucket_window(hours, now)
+      bucket_minutes = (hours * 60.0 / MAX_SERIES_POINTS).ceil
+      [bucket_minutes, aligned_window_start(now - (hours * 3600), bucket_minutes * 60)]
+    end
 
     def ensure_schema
       @mutex.synchronize do
@@ -153,7 +216,7 @@ module Janus
     # Callers hold @mutex.
     def series_in_window(sensor_id, window_start, bucket_minutes)
       rows = @conn.query(<<~SQL, bucket_minutes, sensor_id, window_start).to_a
-        SELECT time_bucket(to_minutes(CAST(? AS INTEGER)), observed, TIMESTAMP '2000-01-01 00:00:00') AS bucket,
+        SELECT #{BUCKET_SQL} AS bucket,
                avg(temperature), avg(humidity)
         FROM readings
         WHERE sensor_id = ? AND observed >= ?

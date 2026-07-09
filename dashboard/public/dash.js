@@ -198,6 +198,87 @@ function withinReach(points, index, xMs, factor) {
   return Math.abs(pointMs(points[index]) - xMs) <= factor * med;
 }
 
+// Signed temperature differential, always with an explicit sign and one
+// decimal, using a true minus sign: "+8.1°" / "−3.2°".
+function fmtDelta(v) {
+  var abs = Math.abs(v).toFixed(1);
+  return (v < 0 ? "−" : "+") + abs + "°";
+}
+
+// Split a delta series into sign-consistent runs for the diverging wash:
+// returns [{sign: 1|-1, points: [...]}], inserting an interpolated
+// {tMs, delta: 0} point at each zero crossing so adjacent runs meet exactly
+// on the baseline. Zero deltas extend the current run; a leading run of
+// zeros takes the sign of the first nonzero value.
+function splitAtZero(points) {
+  var segs = [];
+  var cur = [];
+  var sign = 0;
+  for (var i = 0; i < points.length; i++) {
+    var p = points[i];
+    var s = p.delta > 0 ? 1 : p.delta < 0 ? -1 : 0;
+    if (s !== 0 && sign === 0) sign = s;
+    if (s !== 0 && s !== sign && cur.length > 0) {
+      var prev = points[i - 1];
+      var t0 = pointMs(prev), t1 = pointMs(p);
+      var frac = prev.delta / (prev.delta - p.delta);
+      var zero = { tMs: t0 + (t1 - t0) * frac, delta: 0 };
+      cur.push(zero);
+      segs.push({ sign: sign, points: cur });
+      cur = [zero];
+      sign = s;
+    }
+    cur.push(p);
+  }
+  if (cur.length > 0) segs.push({ sign: sign || 1, points: cur });
+  return segs;
+}
+
+// Dew point rendered as a whole degree for the cooling sentence.
+function fmtDewPoint(v) {
+  return Math.round(v) + "°";
+}
+
+// The cooling strip's one-line verdict, as parts ({text, value: true} parts
+// render in ink). Three states: outside warmer (sealed), cooler and dry
+// (free cooling), cooler but muggy (not worth it). Null when there is no
+// current differential.
+function coolingSentence(now) {
+  if (now === null || now === undefined) return null;
+  var mag = { text: Math.abs(now.delta).toFixed(1) + "°", value: true };
+  if (now.dew_point === null || now.dew_point === undefined) {
+    if (now.delta >= 0) {
+      return [{ text: "Outside is " }, mag,
+        { text: " warmer than the house — keep it sealed" }];
+    }
+    return [{ text: "Outside is " }, mag,
+      { text: " cooler, but the dew point is unknown — keep it sealed" }];
+  }
+  var dew = { text: fmtDewPoint(now.dew_point), value: true };
+  if (now.delta >= 0) {
+    return [{ text: "Outside is " }, mag,
+      { text: " warmer than the house · dew point " }, dew,
+      { text: " — keep it sealed" }];
+  }
+  if (now.free_cooling) {
+    return [{ text: "Outside is " }, mag,
+      { text: " cooler · dew point " }, dew,
+      { text: " — free cooling available" }];
+  }
+  return [{ text: "Outside is " }, mag,
+    { text: " cooler, but dew point " }, dew,
+    { text: " — not worth opening up" }];
+}
+
+var THEME_MODES = ["auto", "light", "dark"];
+
+// Next mode in the auto -> light -> dark cycle; unknown input counts as auto.
+function nextTheme(current) {
+  var i = THEME_MODES.indexOf(current);
+  if (i === -1) i = 0;
+  return THEME_MODES[(i + 1) % THEME_MODES.length];
+}
+
 // Index of the point nearest to xMs; ties snap to the earlier point.
 function nearestIndex(points, xMs) {
   if (points.length === 0) return -1;
@@ -225,7 +306,7 @@ if (typeof document !== "undefined") {
     var colors = {};
     function readColors() {
       var cs = getComputedStyle(document.documentElement);
-      ["page", "muted", "temp", "hum"].forEach(function (name) {
+      ["page", "muted", "secondary", "hairline", "temp", "hum"].forEach(function (name) {
         colors[name] = cs.getPropertyValue("--" + name).trim();
       });
     }
@@ -239,7 +320,9 @@ if (typeof document !== "undefined") {
 
     var state = { hours: 24, data: null };
     var main = document.getElementById("sensors");
+    var coolingEl = document.getElementById("cooling");
     var generatedEl = document.getElementById("generated");
+    var themeBtn = document.getElementById("theme");
     var presetsEl = document.getElementById("presets");
     var tooltip = document.getElementById("tooltip");
     var tooltipVal = tooltip.querySelector(".val");
@@ -312,8 +395,17 @@ if (typeof document !== "undefined") {
       var padTop = opts.padTop, padBottom = opts.padBottom;
       var xs = linScale(opts.xDomain, [PAD_X, VBW - PAD_X]);
       var ext = extentOf(points, key);
+      // A diverging chart anchors its scale to zero even when the data
+      // stays on one side of it.
+      if (opts.includeZero) {
+        if (ext[0] > 0) ext[0] = 0;
+        if (ext[1] < 0) ext[1] = 0;
+      }
       if (ext[0] === ext[1]) { ext = [ext[0] - 1, ext[1] + 1]; }
       var ys = linScale(ext, [height - padBottom, padTop]);
+
+      // Underlays (washes, baselines) go in before the line so it stays on top.
+      if (opts.decorate) opts.decorate(svg, xs, ys);
 
       var segs = segmentSeries(points);
       for (var i = 0; i < segs.length; i++) {
@@ -527,6 +619,62 @@ if (typeof document !== "undefined") {
       return section;
     }
 
+    // The cooling strip: a one-line verdict on opening up the house plus a
+    // diverging outside-minus-house chart. The line stays neutral (secondary
+    // text color); the wash between line and zero carries the sign — warm
+    // red above the baseline, cool blue below.
+    function buildCoolingStrip(cooling, xDomain, hours) {
+      var strip = el("section", "cooling");
+
+      var parts = coolingSentence(cooling.now);
+      if (parts) {
+        var sentence = el("p", "sentence");
+        for (var i = 0; i < parts.length; i++) {
+          sentence.appendChild(el("span", parts[i].value ? "val" : null, parts[i].text));
+        }
+        strip.appendChild(sentence);
+      }
+
+      var points = cooling.series;
+      var charts = el("div", "charts");
+      charts.appendChild(buildChart({
+        points: points, key: "delta",
+        height: 72, padTop: 14, padBottom: 12,
+        color: colors.secondary, unitLabel: "Δ °F, outside − house",
+        xDomain: xDomain, hours: hours,
+        ariaLabel: "Outside minus house temperature difference, " + hoursLabel(hours),
+        fmtValue: function (v) { return "Δ " + fmtDelta(v); },
+        fmtLabel: fmtDelta,
+        includeZero: true,
+        decorate: function (svg, xs, ys) {
+          var y0 = ys(0).toFixed(2);
+          var gapSegs = segmentSeries(points);
+          for (var g = 0; g < gapSegs.length; g++) {
+            var signed = splitAtZero(gapSegs[g]);
+            for (var s = 0; s < signed.length; s++) {
+              var run = signed[s];
+              if (run.points.length < 2) continue;
+              var d = pathFor(run.points, xs, ys, "delta") +
+                "L" + xs(pointMs(run.points[run.points.length - 1])).toFixed(2) + "," + y0 +
+                "L" + xs(pointMs(run.points[0])).toFixed(2) + "," + y0 + "Z";
+              svg.appendChild(svgEl("path", {
+                d: d,
+                fill: run.sign >= 0 ? colors.temp : colors.hum,
+                "fill-opacity": "0.1",
+                stroke: "none",
+              }));
+            }
+          }
+          svg.appendChild(svgEl("line", {
+            x1: String(PAD_X), x2: String(VBW - PAD_X), y1: y0, y2: y0,
+            stroke: colors.hairline, "stroke-width": "1",
+          }));
+        },
+      }));
+      strip.appendChild(charts);
+      return strip;
+    }
+
     function hoursLabel(hours) {
       if (hours <= 24) return "24 hours";
       return (hours / 24) + " days";
@@ -539,6 +687,8 @@ if (typeof document !== "undefined") {
 
     function showMessage(text) {
       hideTooltip();
+      coolingEl.textContent = "";
+      coolingEl.classList.remove("stale");
       main.textContent = "";
       main.appendChild(el("div", "message", text));
       main.classList.remove("stale");
@@ -562,6 +712,11 @@ if (typeof document !== "undefined") {
       }
       var endMs = Date.parse(data.generated_at);
       var xDomain = [endMs - data.hours * 3600 * 1000, endMs];
+      coolingEl.textContent = "";
+      if (data.cooling && data.cooling.series && data.cooling.series.length > 0) {
+        coolingEl.appendChild(buildCoolingStrip(data.cooling, xDomain, data.hours));
+      }
+      coolingEl.classList.remove("stale");
       for (var i = 0; i < data.sensors.length; i++) {
         main.appendChild(buildSensor(data.sensors[i], xDomain, data.hours, openTables));
       }
@@ -583,7 +738,10 @@ if (typeof document !== "undefined") {
     // longer answer the question being asked; background refreshes keep the
     // current render at full strength until new data lands.
     function load(hours, dim) {
-      if (dim) main.classList.add("stale");
+      if (dim) {
+        main.classList.add("stale");
+        coolingEl.classList.add("stale");
+      }
       fetch("/api/dashboard?hours=" + hours)
         .then(function (res) {
           if (!res.ok) throw new Error("http " + res.status);
@@ -597,6 +755,7 @@ if (typeof document !== "undefined") {
           // Keep any previous render on screen; the refresh timer retries.
           if (!state.data) { showMessage("Can't reach the server."); return; }
           main.classList.remove("stale");
+          coolingEl.classList.remove("stale");
           if (!generatedEl.querySelector(".updatefail")) {
             generatedEl.appendChild(el("span", "updatefail", " · update failed — retrying"));
           }
@@ -615,8 +774,36 @@ if (typeof document !== "undefined") {
       load(hours, true);
     });
 
+    // Theme override: "auto" follows the OS via the media query; "light" and
+    // "dark" pin the palette by stamping data-theme on the root element. The
+    // meta color-scheme follows so scrollbars and form controls match.
+    var THEME_STORAGE_KEY = "janus-theme";
+    var theme = localStorage.getItem(THEME_STORAGE_KEY);
+    if (THEME_MODES.indexOf(theme) === -1) theme = "auto";
+
+    function applyTheme() {
+      if (theme === "auto") delete document.documentElement.dataset.theme;
+      else document.documentElement.dataset.theme = theme;
+      document.querySelector('meta[name="color-scheme"]')
+        .setAttribute("content", theme === "auto" ? "light dark" : theme);
+      themeBtn.textContent = "theme: " + theme;
+      themeBtn.setAttribute("aria-label", "theme: " + theme);
+    }
+
+    themeBtn.addEventListener("click", function () {
+      theme = nextTheme(theme);
+      try { localStorage.setItem(THEME_STORAGE_KEY, theme); } catch (e) { /* private mode */ }
+      applyTheme();
+      // Redraw so canvas-side colors (SVG strokes, washes, dot rings,
+      // swatches) re-read the custom properties under the new theme.
+      if (state.data) render(state.data);
+    });
+    applyTheme();
+
     // Re-render on light/dark scheme changes so canvas-side colors (SVG
     // strokes, dot rings, swatches) pick up the new custom-property values.
+    // Under a pinned theme the palette doesn't change, so the redraw is a
+    // harmless no-op.
     matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function () {
       if (state.data) render(state.data);
     });
@@ -648,5 +835,9 @@ if (typeof module !== "undefined") {
     fmtTick: fmtTick,
     nearestIndex: nearestIndex,
     withinReach: withinReach,
+    fmtDelta: fmtDelta,
+    splitAtZero: splitAtZero,
+    coolingSentence: coolingSentence,
+    nextTheme: nextTheme,
   };
 }

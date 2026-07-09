@@ -301,6 +301,117 @@ test("fmtDate renders month and day", () => {
   assert.strictEqual(dash.fmtDate(new Date(2026, 6, 5)), "Jul 5");
 });
 
+test("fmtDelta is always signed with one decimal and a degree sign", () => {
+  const { fmtDelta } = dash;
+  assert.strictEqual(fmtDelta(8.06), "+8.1°");
+  assert.strictEqual(fmtDelta(0), "+0.0°");
+  assert.strictEqual(fmtDelta(-3.2), "−3.2°");
+  assert.strictEqual(fmtDelta(-0.04), "−0.0°");
+});
+
+const dpts = (spec) => spec.map(([m, delta]) => ({ tMs: m * MIN, delta }));
+
+test("splitAtZero inserts interpolated zero points at sign crossings", () => {
+  const { splitAtZero } = dash;
+  const segs = splitAtZero(dpts([[0, 2], [10, -2], [20, -4], [30, 4]]));
+  assert.strictEqual(segs.length, 3);
+  assert.deepStrictEqual(segs.map((s) => s.sign), [1, -1, 1]);
+  // First crossing halfway between minutes 0 and 10.
+  assert.deepStrictEqual(segs[0].points, [{ tMs: 0, delta: 2 }, { tMs: 5 * MIN, delta: 0 }]);
+  assert.deepStrictEqual(segs[1].points[0], { tMs: 5 * MIN, delta: 0 });
+  // Second crossing at minute 25 (from -4 to 4 over 10 minutes).
+  assert.deepStrictEqual(segs[1].points[segs[1].points.length - 1], { tMs: 25 * MIN, delta: 0 });
+  assert.deepStrictEqual(segs[2].points, [{ tMs: 25 * MIN, delta: 0 }, { tMs: 30 * MIN, delta: 4 }]);
+});
+
+test("splitAtZero keeps an all-positive series as one signed segment", () => {
+  const { splitAtZero } = dash;
+  const segs = splitAtZero(dpts([[0, 1], [10, 0], [20, 3]]));
+  assert.strictEqual(segs.length, 1);
+  assert.strictEqual(segs[0].sign, 1);
+  assert.strictEqual(segs[0].points.length, 3);
+});
+
+test("splitAtZero keeps an all-negative series as one signed segment", () => {
+  const { splitAtZero } = dash;
+  const segs = splitAtZero(dpts([[0, -1], [10, -3]]));
+  assert.strictEqual(segs.length, 1);
+  assert.strictEqual(segs[0].sign, -1);
+});
+
+test("splitAtZero on an empty series returns no segments", () => {
+  assert.deepStrictEqual(dash.splitAtZero([]), []);
+});
+
+test("coolingSentence describes a warmer outside as keep-it-sealed", () => {
+  const parts = dash.coolingSentence({
+    outside_temp: 96.1, house_temp: 88.0, delta: 8.1, dew_point: 74.3, free_cooling: false,
+  });
+  assert.deepStrictEqual(parts, [
+    { text: "Outside is " }, { text: "8.1°", value: true },
+    { text: " warmer than the house · dew point " }, { text: "74°", value: true },
+    { text: " — keep it sealed" },
+  ]);
+});
+
+test("coolingSentence announces free cooling when cooler and dry", () => {
+  const parts = dash.coolingSentence({
+    outside_temp: 68.0, house_temp: 72.2, delta: -4.2, dew_point: 58.0, free_cooling: true,
+  });
+  assert.deepStrictEqual(parts, [
+    { text: "Outside is " }, { text: "4.2°", value: true },
+    { text: " cooler · dew point " }, { text: "58°", value: true },
+    { text: " — free cooling available" },
+  ]);
+});
+
+test("coolingSentence rejects muggy outside air even when cooler", () => {
+  const parts = dash.coolingSentence({
+    outside_temp: 68.0, house_temp: 72.2, delta: -4.2, dew_point: 70.6, free_cooling: false,
+  });
+  assert.deepStrictEqual(parts, [
+    { text: "Outside is " }, { text: "4.2°", value: true },
+    { text: " cooler, but dew point " }, { text: "71°", value: true },
+    { text: " — not worth opening up" },
+  ]);
+});
+
+test("coolingSentence omits the dew point clause when it is unknown", () => {
+  const warmer = dash.coolingSentence({
+    outside_temp: 96.1, house_temp: 88.0, delta: 8.1, dew_point: null, free_cooling: false,
+  });
+  assert.deepStrictEqual(warmer, [
+    { text: "Outside is " }, { text: "8.1°", value: true },
+    { text: " warmer than the house — keep it sealed" },
+  ]);
+  const cooler = dash.coolingSentence({
+    outside_temp: 68.0, house_temp: 72.2, delta: -4.2, dew_point: null, free_cooling: false,
+  });
+  assert.deepStrictEqual(cooler, [
+    { text: "Outside is " }, { text: "4.2°", value: true },
+    { text: " cooler, but the dew point is unknown — keep it sealed" },
+  ]);
+});
+
+test("coolingSentence is null without a current differential", () => {
+  assert.strictEqual(dash.coolingSentence(null), null);
+  assert.strictEqual(dash.coolingSentence(undefined), null);
+});
+
+test("nextTheme cycles auto to light to dark and back", () => {
+  const { nextTheme } = dash;
+  assert.strictEqual(nextTheme("auto"), "light");
+  assert.strictEqual(nextTheme("light"), "dark");
+  assert.strictEqual(nextTheme("dark"), "auto");
+});
+
+test("nextTheme treats unknown input as auto", () => {
+  const { nextTheme } = dash;
+  assert.strictEqual(nextTheme("solarized"), "light");
+  assert.strictEqual(nextTheme(null), "light");
+  assert.strictEqual(nextTheme(undefined), "light");
+});
+
 test("fixture matches the dashboard API contract", () => {
   assert.strictEqual(typeof fixture.generated_at, "string");
   assert.ok(!Number.isNaN(Date.parse(fixture.generated_at)));
