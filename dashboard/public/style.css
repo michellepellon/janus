@@ -11,8 +11,12 @@
   --hum: #33689e;
 }
 
+/* Dark tokens apply in two ways — following the OS unless the user pinned
+   light, and whenever the user pinned dark. The block is duplicated
+   deliberately: CSS custom-property declarations can't be shared between a
+   media-query selector and a plain one. Keep both copies identical. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --page: #16150f;
     --ink: #e8e6da;
     --secondary: #b4b2a4;
@@ -21,6 +25,16 @@
     --temp: #c4685a;
     --hum: #5b92d4;
   }
+}
+
+:root[data-theme="dark"] {
+  --page: #16150f;
+  --ink: #e8e6da;
+  --secondary: #b4b2a4;
+  --muted: #8f8d80;
+  --hairline: #3a382e;
+  --temp: #c4685a;
+  --hum: #5b92d4;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -66,6 +80,25 @@ h1 {
   font-style: italic;
 }
 
+/* Quiet text button, styled like the preset links. */
+.themetoggle {
+  background: none;
+  border: none;
+  padding: 0 0 1px;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.themetoggle:hover { color: var(--secondary); }
+
+.themetoggle:focus-visible {
+  color: var(--secondary);
+  outline: 1px dotted var(--muted);
+  outline-offset: 6px;
+}
+
 /* ---- modules: each home domain (climate today; more join later) ---- */
 
 .module { margin-top: 1.7rem; }
@@ -107,6 +140,28 @@ h1 {
 .presets .sep { margin: 0 0.55rem; }
 
 header { border-bottom: 1px solid var(--hairline); padding-bottom: 1.1rem; }
+
+/* ---- cooling strip ---- */
+
+/* Mirrors the sensor grid so the ΔT chart column lines up with the sensor
+   charts below; the sentence spans the full width above it. */
+.cooling {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  column-gap: 3rem;
+  padding: 1.7rem 0 1.9rem;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.cooling .sentence {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  margin-bottom: 1.2rem;
+}
+
+.cooling .sentence .val { color: var(--ink); }
+
+.cooling .charts { grid-column: 2; }
 
 /* ---- sensors ---- */
 
@@ -309,9 +364,9 @@ svg:focus-visible {
   padding: 5rem 1rem;
 }
 
-#sensors { transition: opacity 0.25s ease; }
+#sensors, #cooling { transition: opacity 0.25s ease; }
 
-#sensors.stale { opacity: 0.45; }
+#sensors.stale, #cooling.stale { opacity: 0.45; }
 
 .tooltip {
   display: none;
@@ -338,4 +393,6 @@ svg:focus-visible {
     gap: 1.4rem;
     padding: 2rem 0 1.8rem;
   }
+  .cooling { grid-template-columns: 1fr; }
+  .cooling .charts { grid-column: 1; }
 }

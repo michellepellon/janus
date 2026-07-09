@@ -59,11 +59,17 @@ class ServerE2ETest < Minitest::Test
     assert_equal "200", api.code
     payload = JSON.parse(api.body)
     assert_equal 24, payload["hours"]
-    assert_equal %w[Bedroom Study], payload["sensors"].map { |s| s["name"] }
+    assert_equal %w[Bedroom Outside Study], payload["sensors"].map { |s| s["name"] }
     study = payload["sensors"].last
     assert_in_delta 71.6, study["latest"]["temperature"], 0.05
     assert_operator study["series"].size, :>, 0
     assert_match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*Z/, payload["generated_at"])
+
+    cooling = payload.fetch("cooling")
+    assert_equal %w[now series], cooling.keys.sort
+    assert_equal %w[delta dew_point free_cooling house_temp outside_temp], cooling["now"].keys.sort
+    assert_operator cooling["now"]["delta"], :>, 0, "seeded outside runs hotter than the house"
+    assert_operator cooling["series"].size, :>, 0
 
     assert_equal "400", get("/api/dashboard?hours=48").code
 
@@ -87,6 +93,10 @@ class ServerE2ETest < Minitest::Test
     end
     store.insert_readings("e2e-1", readings)
     store.insert_readings("e2e-2", readings.map { |r| Reading.new(observed: r.observed, temperature: 68.0, humidity: 50.0) })
+    store.upsert_sensor(id: "nws.KEFD", name: "Outside", active: true, battery_percentage: nil)
+    store.insert_readings("nws.KEFD", (0...2).map do |i|
+      Reading.new(observed: now - (i * 3600), temperature: 93.0 - i, humidity: 45.0)
+    end)
     store.close
   end
 

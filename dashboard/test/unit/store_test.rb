@@ -166,6 +166,77 @@ class StoreTest < Minitest::Test
     end
   end
 
+  def test_differential_bucket_deltas_are_outside_minus_indoor_mean
+    with_tmp_db_path do |path|
+      store = Janus::Store.new(path: path)
+      store.upsert_sensor(id: "nws.KEFD", name: "Outside", active: true, battery_percentage: nil)
+      store.upsert_sensor(id: "s1", name: "Attic", active: true, battery_percentage: 90.0)
+      store.upsert_sensor(id: "s2", name: "Bedroom", active: true, battery_percentage: 80.0)
+      now = Time.utc(2026, 7, 7, 12, 0, 0) # 24h window -> 10-minute buckets
+
+      store.insert_readings("nws.KEFD", readings(
+        [Time.utc(2026, 7, 6, 11, 0, 0), 85.0, 50.0],  # outside the window
+        [Time.utc(2026, 7, 7, 9, 55, 0), 88.0, 55.0],  # bucket 09:50, no indoor data
+        [Time.utc(2026, 7, 7, 10, 5, 0), 90.0, 50.0],  # bucket 10:00
+        [Time.utc(2026, 7, 7, 10, 15, 0), 92.0, 48.0]  # bucket 10:10
+      ))
+      store.insert_readings("s1", readings(
+        [Time.utc(2026, 7, 6, 11, 0, 0), 70.0, 40.0],  # outside the window
+        [Time.utc(2026, 7, 7, 10, 2, 0), 74.0, 40.0],  # bucket 10:00
+        [Time.utc(2026, 7, 7, 10, 4, 0), 76.0, 41.0],  # bucket 10:00
+        [Time.utc(2026, 7, 7, 10, 12, 0), 78.0, 42.0], # bucket 10:10
+        [Time.utc(2026, 7, 7, 10, 22, 0), 70.0, 43.0]  # bucket 10:20, no outside data
+      ))
+      store.insert_readings("s2", readings(
+        [Time.utc(2026, 7, 7, 10, 6, 0), 71.0, 44.0]   # bucket 10:00
+      ))
+
+      series = store.differential(hours: 24, now: now)
+
+      assert_equal [
+        Time.utc(2026, 7, 7, 10, 0, 0),
+        Time.utc(2026, 7, 7, 10, 10, 0)
+      ], series.map { |pt| pt[:t] }, "buckets missing either side must be omitted"
+      assert series.all? { |pt| pt[:t].utc? }
+      # 10:00 indoor mean over all readings: (74 + 76 + 71) / 3
+      assert_in_delta 90.0 - (221.0 / 3), series[0][:delta]
+      assert_in_delta 92.0 - 78.0, series[1][:delta]
+      store.close
+    end
+  end
+
+  def test_differential_is_empty_without_an_outside_sensor
+    with_tmp_db_path do |path|
+      store = Janus::Store.new(path: path)
+      store.upsert_sensor(id: "s1", name: "Attic", active: true, battery_percentage: 90.0)
+      store.insert_readings("s1", readings([Time.utc(2026, 7, 7, 10, 0, 0), 74.0, 40.0]))
+
+      assert_equal [], store.differential(hours: 24, now: Time.utc(2026, 7, 7, 12, 0, 0))
+      store.close
+    end
+  end
+
+  def test_latest_outside_returns_most_recent_windowed_reading_or_nil
+    with_tmp_db_path do |path|
+      store = Janus::Store.new(path: path)
+      now = Time.utc(2026, 7, 7, 12, 0, 0)
+      assert_nil store.latest_outside(hours: 24, now: now)
+
+      store.insert_readings("nws.KEFD", readings(
+        [Time.utc(2026, 7, 7, 10, 0, 0), 90.0, 50.0],
+        [Time.utc(2026, 7, 7, 11, 0, 0), 92.0, 48.0]
+      ))
+      latest = store.latest_outside(hours: 24, now: now)
+      assert_equal Time.utc(2026, 7, 7, 11, 0, 0), latest[:observed]
+      assert_in_delta 92.0, latest[:temperature]
+      assert_in_delta 48.0, latest[:humidity]
+
+      assert_nil store.latest_outside(hours: 24, now: Time.utc(2026, 7, 9, 12, 0, 0)),
+                 "readings older than the window must not count"
+      store.close
+    end
+  end
+
   def test_dashboard_series_never_exceeds_144_points_for_each_allowed_window
     with_tmp_db_path do |path|
       store = Janus::Store.new(path: path)
