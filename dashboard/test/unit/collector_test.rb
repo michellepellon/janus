@@ -189,6 +189,49 @@ class CollectorTest < Minitest::Test
     end
   end
 
+  def test_retries_rate_limited_api_errors
+    with_tmp_db_path do |path|
+      store = Janus::Store.new(path: path)
+      samples = stub_samples([Time.utc(2026, 7, 7, 10, 0)])
+      client = StubClient.new(sensors: [stub_sensor], batches: { "s1" => [samples] })
+      throttled = [Sensorpush::APIError.new("Too many requests", status: 429)]
+      client.define_singleton_method(:samples) do |id, options = {}|
+        raise throttled.shift unless throttled.empty?
+
+        @samples_calls << [id, options]
+        queue = @batches.fetch(id, [])
+        queue.empty? ? [] : queue.shift
+      end
+      naps = []
+
+      result = Janus::Collector.new(
+        client: client, store: store, sleeper: ->(s) { naps << s }
+      ).run_once
+
+      assert_equal({ sensors: 1, readings: 1 }, result)
+      assert_equal 1, naps.size
+      store.close
+    end
+  end
+
+  def test_does_not_retry_client_side_api_errors
+    with_tmp_db_path do |path|
+      store = Janus::Store.new(path: path)
+      client = StubClient.new(sensors: [stub_sensor])
+      attempts = 0
+      client.define_singleton_method(:samples) do |_id, _options = {}|
+        attempts += 1
+        raise Sensorpush::APIError.new("Bad request", status: 400)
+      end
+
+      assert_raises(Sensorpush::APIError) do
+        Janus::Collector.new(client: client, store: store, sleeper: ->(_s) {}).run_once
+      end
+      assert_equal 1, attempts
+      store.close
+    end
+  end
+
   def test_gives_up_after_exhausting_retries_and_keeps_sensor_context
     with_tmp_db_path do |path|
       store = Janus::Store.new(path: path)

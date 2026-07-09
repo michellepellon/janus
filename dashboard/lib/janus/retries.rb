@@ -20,18 +20,31 @@ module Janus
     private
 
     # Runs the block, sleeping through BACKOFF_SECONDS between attempts on
-    # transient network errors; the final failure propagates to the caller.
+    # transient failures; the final failure — or any non-transient one, like a
+    # 4xx client error — propagates to the caller.
     def with_retries
       attempt = 0
       begin
         yield
-      rescue *TRANSIENT_ERRORS
+      rescue StandardError => e
+        raise unless transient?(e)
         raise if attempt >= BACKOFF_SECONDS.size
 
         @sleeper.call(BACKOFF_SECONDS[attempt])
         attempt += 1
         retry
       end
+    end
+
+    # Connection-level failures are always transient. API errors that carry an
+    # HTTP status (Sensorpush::APIError, Janus::Weather::Error) are transient
+    # for rate limiting (429) and server errors (5xx) — a client error means
+    # the request itself is wrong and retrying cannot help.
+    def transient?(error)
+      return true if TRANSIENT_ERRORS.any? { |klass| error.is_a?(klass) }
+      return false unless error.respond_to?(:status) && error.status
+
+      error.status == 429 || (500..599).cover?(error.status)
     end
   end
 end

@@ -9,7 +9,8 @@ gem "sinatra", "~> 4"
 gem "rackup"
 gem "puma"
 gem "duckdb"
-gem "sensorpush"
+# From the tagged GitHub release until 0.2.0 is published to RubyGems.
+gem "sensorpush", git: "https://github.com/michellepellon/sensorpush.rb", tag: "v0.2.0"
 gem "dotenv"
 gem "rake"
 

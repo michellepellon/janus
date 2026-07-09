@@ -8,7 +8,16 @@ require "uri"
 
 module Janus
   module Weather
-    class Error < StandardError; end
+    # Carries the HTTP status so the retry ladder can tell rate limiting and
+    # server errors (transient) apart from client errors (fatal).
+    class Error < StandardError
+      attr_reader :status
+
+      def initialize(message, status: nil)
+        @status = status
+        super(message)
+      end
+    end
 
     # One station observation, duck-typed like a sensorpush sample so
     # Janus::Store#insert_readings accepts it unchanged.
@@ -48,7 +57,7 @@ module Janus
         uri.query = URI.encode_www_form(start: since.getutc.iso8601, limit: OBSERVATIONS_LIMIT)
         status, body = @fetcher.call(uri, { "User-Agent" => @user_agent })
         unless (200..299).cover?(status)
-          raise Error, "NWS observations for #{@station} returned HTTP #{status}"
+          raise Error.new("NWS observations for #{@station} returned HTTP #{status}", status: status)
         end
 
         parse(body)
