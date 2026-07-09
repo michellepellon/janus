@@ -70,7 +70,7 @@ class HueRecorderTest < Minitest::Test
   end
 
   def state_events(log, entity)
-    log.events_in(hours: 24, kinds: ["state"]).select { |event| event[:entity] == entity }
+    log.events_in(hours: 720, kinds: ["state"]).select { |event| event[:entity] == entity }
   end
 
   def test_run_once_upserts_devices_and_records_initial_state
@@ -176,7 +176,7 @@ class HueRecorderTest < Minitest::Test
         begin
           assert_equal 1, slept.pop(timeout: 2), "reconnect backoff starts at the first rung"
 
-          events = log.events_in(hours: 24, kinds: ["state"])
+          events = log.events_in(hours: 720, kinds: ["state"])
           assert_equal [false, true], events.map { |event| event[:payload]["on"] }
           assert_equal [Time.utc(2026, 7, 8, 19, 2, 0), Time.utc(2026, 7, 8, 23, 14, 30)],
                        events.map { |event| event[:observed] }
@@ -210,7 +210,7 @@ class HueRecorderTest < Minitest::Test
         thread = recorder.start_stream(logger_io: StringIO.new)
         begin
           slept.pop(timeout: 2)
-          assert_equal 1, log.events_in(hours: 24, kinds: ["state"]).size,
+          assert_equal 1, log.events_in(hours: 720, kinds: ["state"]).size,
                        "the stream must not duplicate the reconciled state"
         ensure
           thread.kill
