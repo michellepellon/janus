@@ -1,0 +1,88 @@
+#!/usr/bin/env ruby
+# ABOUTME: Pairs the dashboard with a Philips Hue bridge: discovers it, waits
+# ABOUTME: for the link button, and appends the credentials to .env.
+
+ROOT = File.expand_path("..", __dir__)
+
+require "optparse"
+
+ip = nil
+parser = OptionParser.new do |opts|
+  opts.banner = <<~BANNER
+    Usage: bin/hue-pair [options]
+
+    Pairs the dashboard with the Philips Hue bridge on your network:
+      1. Finds the bridge via https://discovery.meethue.com/ (or --ip).
+      2. Asks you to press the bridge's physical link button.
+      3. Polls the bridge every 2 s (for up to 90 s) until it answers.
+      4. Appends HUE_BRIDGE_IP and HUE_APP_KEY to #{File.join(ROOT, ".env")}
+         (existing content is never overwritten).
+
+    Restart bin/server afterwards to start recording light and outlet state.
+  BANNER
+  opts.on("--ip ADDRESS", "Bridge IP address (skips cloud discovery)") { |value| ip = value }
+  opts.on("-h", "--help", "Show this help") do
+    puts opts
+    exit 0
+  end
+end
+
+begin
+  parser.parse!
+rescue OptionParser::ParseError => e
+  warn "bin/hue-pair: #{e.message}"
+  warn parser
+  exit 1
+end
+
+# Pairing needs only the standard library, so no bundler re-exec is required.
+$LOAD_PATH.unshift(File.join(ROOT, "lib"))
+require "janus/hue"
+require "janus/env_file"
+
+if ip.nil?
+  print "Looking for a Hue bridge via discovery.meethue.com... "
+  begin
+    ip = Janus::Hue.discover
+  rescue StandardError => e
+    puts "failed"
+    warn "bin/hue-pair: discovery failed (#{e.message})."
+    warn "Find the bridge's IP in the Hue app (Settings > My hue system > bridge) and retry with --ip."
+    exit 1
+  end
+  if ip.nil?
+    puts "none found"
+    warn "bin/hue-pair: no bridge registered on this network."
+    warn "Find the bridge's IP in the Hue app and retry with --ip, and make sure the bridge is powered on."
+    exit 1
+  end
+  puts ip
+end
+
+puts "Press the round link button on the bridge at #{ip} now."
+print "Waiting"
+begin
+  app_key = Janus::Hue.wait_for_pairing(ip: ip, on_wait: -> { print "." })
+rescue Janus::Hue::LinkButtonNotPressed
+  puts
+  warn "bin/hue-pair: the link button was not pressed within 90 s — run this again and press it."
+  exit 1
+rescue StandardError => e
+  puts
+  warn "bin/hue-pair: pairing failed: #{e.message}"
+  warn "Check that the bridge is powered on and reachable at #{ip}, then retry."
+  exit 1
+end
+puts " paired."
+
+env_path = File.join(ROOT, ".env")
+duplicates = Janus::EnvFile.append(env_path, "HUE_BRIDGE_IP" => ip, "HUE_APP_KEY" => app_key)
+puts "Appended HUE_BRIDGE_IP and HUE_APP_KEY to #{env_path}."
+unless duplicates.empty?
+  puts "Note: #{duplicates.join(", ")} already appeared in .env; the new values were appended"
+  puts "and take precedence, but you may want to tidy the older lines."
+end
+puts
+puts "Next steps:"
+puts "  1. Restart the dashboard: bin/server"
+puts "  2. Lights and outlets appear on the dashboard as state history accrues."
