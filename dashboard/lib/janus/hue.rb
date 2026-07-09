@@ -133,6 +133,14 @@ module Janus
         @io = io
       end
 
+      def close
+        @io.close
+      end
+
+      def closed?
+        @io.closed?
+      end
+
       def each_line
         pending = +""
         loop do

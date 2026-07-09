@@ -1,8 +1,10 @@
 # ABOUTME: Unit tests for Janus::Poller — skip logic when unconfigured, the
-# ABOUTME: polling loop via injected client/weather factories, and error recovery.
+# ABOUTME: polling loop via injected source factories, error recovery, and the
+# ABOUTME: collection audit trail.
 
 require_relative "../test_helper"
 require "janus/store"
+require "janus/event_log"
 require "janus/poller"
 require "stringio"
 
@@ -54,6 +56,27 @@ class PollerTest < Minitest::Test
     end
   end
 
+  # Hue stub whose lights() call signals a Queue, mirroring SignalingClient;
+  # open_event_stream parks forever so the stream thread stays quiet.
+  class SignalingHue
+    attr_reader :stream_opens
+
+    def initialize(queue)
+      @queue = queue
+      @stream_opens = Queue.new
+    end
+
+    def lights
+      @queue << :hue
+      []
+    end
+
+    def open_event_stream
+      @stream_opens << :opened
+      Queue.new.pop # park the stream thread; the poller loop is under test
+    end
+  end
+
   def with_env(vars)
     saved = vars.keys.to_h { |k| [k, ENV[k]] }
     vars.each { |k, v| ENV[k] = v }
@@ -75,21 +98,127 @@ class PollerTest < Minitest::Test
 
   def test_start_if_configured_skips_when_nothing_is_configured
     with_env("SENSORPUSH_USERNAME" => nil, "SENSORPUSH_PASSWORD" => nil,
-             "JANUS_OUTSIDE_STATION" => nil, "JANUS_COLLECT" => nil) do
+             "JANUS_OUTSIDE_STATION" => nil, "JANUS_COLLECT" => nil,
+             "HUE_BRIDGE_IP" => nil, "HUE_APP_KEY" => nil) do
       with_store do |store|
         log = StringIO.new
         result = Janus::Poller.start_if_configured(store: store, logger_io: log)
         assert_nil result
         assert_match(/SENSORPUSH_USERNAME/, log.string)
         assert_match(/JANUS_OUTSIDE_STATION/, log.string)
+        assert_match(/HUE_BRIDGE_IP/, log.string)
         assert_equal 1, log.string.lines.size
+      end
+    end
+  end
+
+  def test_start_if_configured_notes_skipped_hue_once_when_other_sources_run
+    with_env("SENSORPUSH_USERNAME" => nil, "SENSORPUSH_PASSWORD" => nil,
+             "JANUS_OUTSIDE_STATION" => "KEFD", "JANUS_COLLECT" => nil,
+             "HUE_BRIDGE_IP" => nil, "HUE_APP_KEY" => nil) do
+      with_store do |store|
+        queue = Queue.new
+        log = StringIO.new
+        thread = Janus::Poller.start_if_configured(
+          store: store, logger_io: log, interval: 0.01,
+          weather_factory: proc { SignalingWeather.new(queue) }
+        )
+        begin
+          refute_nil thread
+          queue.pop(timeout: 2)
+          skip_lines = log.string.lines.grep(/skipping hue collection/)
+          assert_equal 1, skip_lines.size
+        ensure
+          thread.kill
+          thread.join
+        end
+      end
+    end
+  end
+
+  def test_start_if_configured_runs_hue_when_bridge_credentials_set
+    with_env("SENSORPUSH_USERNAME" => nil, "SENSORPUSH_PASSWORD" => nil,
+             "JANUS_OUTSIDE_STATION" => nil, "JANUS_COLLECT" => nil,
+             "HUE_BRIDGE_IP" => "192.168.1.50", "HUE_APP_KEY" => "key") do
+      with_store do |store|
+        queue = Queue.new
+        hue = SignalingHue.new(queue)
+        event_log = Janus::EventLog.new(store: store)
+        thread = Janus::Poller.start_if_configured(
+          store: store, event_log: event_log, logger_io: StringIO.new,
+          interval: 0.01, hue_factory: proc { hue }, hue_stream: false
+        )
+        begin
+          refute_nil thread
+          assert_equal :hue, queue.pop(timeout: 2)
+          assert_equal :hue, queue.pop(timeout: 2)
+        ensure
+          thread.kill
+          thread.join
+        end
+      end
+    end
+  end
+
+  def test_start_raises_when_hue_is_enabled_without_an_event_log
+    with_store do |store|
+      assert_raises(ArgumentError) do
+        Janus::Poller.start(store: store, hue: true, logger_io: StringIO.new)
+      end
+    end
+  end
+
+  def test_start_records_collection_events_for_each_source
+    with_store do |store|
+      queue = Queue.new
+      event_log = Janus::EventLog.new(store: store)
+      hue = SignalingHue.new(queue)
+      thread = Janus::Poller.start(
+        store: store, event_log: event_log, interval: 0.01,
+        client_factory: proc { SignalingClient.new(queue) },
+        weather_factory: proc { SignalingWeather.new(queue) },
+        hue_factory: proc { hue },
+        weather: true, hue: true, hue_stream: false,
+        logger_io: StringIO.new
+      )
+      begin
+        6.times { queue.pop(timeout: 2) } # two full cycles across all sources
+        events = event_log.events_in(hours: 1, kinds: ["collection"])
+        assert_operator events.size, :>=, 3
+        assert_equal %w[hue sensorpush weather], events.map { |event| event[:entity] }.uniq.sort
+        assert(events.all? { |event| event[:source] == "janus" })
+        hue_event = events.find { |event| event[:entity] == "hue" }
+        assert_equal({ "devices" => 0, "state_events" => 0 }, hue_event[:payload])
+      ensure
+        thread.kill
+        thread.join
+      end
+    end
+  end
+
+  def test_start_launches_the_hue_stream_thread_when_enabled
+    with_store do |store|
+      queue = Queue.new
+      hue = SignalingHue.new(queue)
+      thread = Janus::Poller.start(
+        store: store, event_log: Janus::EventLog.new(store: store), interval: 0.01,
+        hue_factory: proc { hue }, sensorpush: false, hue: true,
+        logger_io: StringIO.new
+      )
+      begin
+        assert_equal :opened, hue.stream_opens.pop(timeout: 2)
+        assert_equal :hue, queue.pop(timeout: 2)
+      ensure
+        thread.kill
+        thread.join
       end
     end
   end
 
   def test_start_if_configured_runs_weather_only_when_station_set_without_credentials
     with_env("SENSORPUSH_USERNAME" => nil, "SENSORPUSH_PASSWORD" => nil,
-             "JANUS_OUTSIDE_STATION" => "KEFD", "JANUS_COLLECT" => nil) do
+             "JANUS_OUTSIDE_STATION" => "KEFD", "JANUS_COLLECT" => nil,
+             "HUE_BRIDGE_IP" => nil, "HUE_APP_KEY" => nil) do
       with_store do |store|
         queue = Queue.new
         client_factory_calls = 0
@@ -115,7 +244,7 @@ class PollerTest < Minitest::Test
 
   def test_start_if_configured_skips_when_collection_off
     with_env("SENSORPUSH_USERNAME" => "u@example.com", "SENSORPUSH_PASSWORD" => "pw",
-             "JANUS_COLLECT" => "off") do
+             "JANUS_COLLECT" => "off", "HUE_BRIDGE_IP" => nil, "HUE_APP_KEY" => nil) do
       with_store do |store|
         log = StringIO.new
         result = Janus::Poller.start_if_configured(store: store, logger_io: log)

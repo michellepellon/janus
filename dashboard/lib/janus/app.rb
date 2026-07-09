@@ -5,6 +5,7 @@ require "sinatra/base"
 require "json"
 require "time"
 require_relative "store"
+require_relative "event_log"
 require_relative "dew_point"
 
 module Janus
@@ -32,6 +33,13 @@ module Janus
     def self.store
       set :store, Store.new(path: ENV.fetch("JANUS_DB_PATH", "data/janus.duckdb"))
       settings.store
+    end
+
+    # The shared EventLog over the same store, lazily opened the same way so
+    # tests can inject their own before first use.
+    def self.event_log
+      set :event_log, EventLog.new(store: store)
+      settings.event_log
     end
 
     get "/healthz" do
