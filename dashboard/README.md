@@ -1,10 +1,11 @@
 # Janus dashboard
 
-A Tufte-inspired house-climate dashboard. Reads temperature and humidity from
+A Tufte-inspired house dashboard. Reads temperature and humidity from
 [SensorPush](https://www.sensorpush.com) sensors via the
-[sensorpush gem](https://github.com/michellepellon/sensorpush.rb), stores
-readings in DuckDB, and serves a plain HTML/CSS/JS page — no frameworks, no
-build step, no external requests.
+[sensorpush gem](https://github.com/michellepellon/sensorpush.rb), records
+light and smart-outlet state from a Philips Hue bridge, stores everything in
+DuckDB, and serves a plain HTML/CSS/JS page — no frameworks, no build step,
+no external requests.
 
 ## Setup
 
@@ -34,14 +35,35 @@ hourly (plus specials) and the NWS keeps 7 days of history, so backfill covers
 a week at most. Unset the variable to disable it; `JANUS_NWS_USER_AGENT`
 customizes the User-Agent the NWS API requires.
 
+## Lights & outlets
+
+Philips Hue lights and smart plugs appear in a read-only "lights & outlets"
+journal: current state plus an on/off timeline per device. Janus records
+state — control comes later. To pair:
+
+1. Power on the Hue bridge and make sure it's on your network.
+2. Run `bin/hue-pair` (it finds the bridge, or pass `--ip`).
+3. Press the bridge's round link button when prompted.
+4. Restart `bin/server`.
+
+Pairing appends `HUE_BRIDGE_IP` and `HUE_APP_KEY` to `.env`; unset them to
+disable Hue collection. The server then reconciles device state every poll
+and follows the bridge's event stream for changes in between, storing
+append-only state events in the `events` table. The module stays hidden
+until at least one device is recorded.
+
 ## Layout
 
 - `lib/janus/store.rb` — DuckDB schema and queries (idempotent inserts,
-  time-bucketed dashboard windows)
+  time-bucketed dashboard windows, devices registry)
+- `lib/janus/event_log.rb` — append-only events journal, command ledger, and
+  windowed on/off interval queries
 - `lib/janus/collector.rb` — incremental SensorPush collection with paging and
   transient-network retry
 - `lib/janus/weather.rb` — NWS station observations shaped like SensorPush samples
 - `lib/janus/weather_collector.rb` — the Outside pseudo-sensor collection
+- `lib/janus/hue.rb` — Philips Hue CLIP v2 client: pairing, lights, SSE events
+- `lib/janus/hue_recorder.rb` — reconciles and streams light state into the log
 - `lib/janus/poller.rb` — background collection thread inside the server
 - `lib/janus/app.rb` — Sinatra: `/`, `/healthz`, `/api/dashboard?hours=24|72|168|720`
 - `public/` — the page: `index.html`, `style.css`, `dash.js` (plain SVG charts)

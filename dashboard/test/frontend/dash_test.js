@@ -412,6 +412,94 @@ test("nextTheme treats unknown input as auto", () => {
   assert.strictEqual(nextTheme(undefined), "light");
 });
 
+// ---- lights & outlets strip logic ----
+
+const H = 3600 * 1000;
+const T0 = Date.parse("2026-07-08T00:00:00Z");
+const iso = (ms) => new Date(ms).toISOString();
+const ivl = (fromH, toH, on) => ({ from: iso(T0 + fromH * H), to: iso(T0 + toH * H), on });
+
+test("intervalSegments passes through intervals inside the domain", () => {
+  const { intervalSegments } = dash;
+  const segs = intervalSegments([ivl(2, 5, true), ivl(5, 8, false)], [T0, T0 + 24 * H]);
+  assert.deepStrictEqual(segs, [
+    { fromMs: T0 + 2 * H, toMs: T0 + 5 * H, on: true },
+    { fromMs: T0 + 5 * H, toMs: T0 + 8 * H, on: false },
+  ]);
+});
+
+test("intervalSegments clips intervals overlapping the domain edges", () => {
+  const { intervalSegments } = dash;
+  const segs = intervalSegments([ivl(-3, 2, true), ivl(22, 30, false)], [T0, T0 + 24 * H]);
+  assert.deepStrictEqual(segs, [
+    { fromMs: T0, toMs: T0 + 2 * H, on: true },
+    { fromMs: T0 + 22 * H, toMs: T0 + 24 * H, on: false },
+  ]);
+});
+
+test("intervalSegments drops intervals entirely outside the domain", () => {
+  const { intervalSegments } = dash;
+  assert.deepStrictEqual(intervalSegments([ivl(-5, -1, true), ivl(25, 30, false)], [T0, T0 + 24 * H]), []);
+  assert.deepStrictEqual(intervalSegments([], [T0, T0 + 24 * H]), []);
+  assert.deepStrictEqual(intervalSegments(null, [T0, T0 + 24 * H]), []);
+});
+
+test("unknownRanges covers the whole domain when nothing is recorded", () => {
+  const { unknownRanges } = dash;
+  assert.deepStrictEqual(unknownRanges([], [T0, T0 + 24 * H]),
+    [{ fromMs: T0, toMs: T0 + 24 * H }]);
+});
+
+test("unknownRanges finds the gaps around and between segments", () => {
+  const { unknownRanges, intervalSegments } = dash;
+  const segs = intervalSegments([ivl(2, 5, true), ivl(8, 10, false)], [T0, T0 + 24 * H]);
+  assert.deepStrictEqual(unknownRanges(segs, [T0, T0 + 24 * H]), [
+    { fromMs: T0, toMs: T0 + 2 * H },
+    { fromMs: T0 + 5 * H, toMs: T0 + 8 * H },
+    { fromMs: T0 + 10 * H, toMs: T0 + 24 * H },
+  ]);
+});
+
+test("unknownRanges is empty when segments cover the domain", () => {
+  const { unknownRanges, intervalSegments } = dash;
+  const segs = intervalSegments([ivl(0, 10, true), ivl(10, 24, false)], [T0, T0 + 24 * H]);
+  assert.deepStrictEqual(unknownRanges(segs, [T0, T0 + 24 * H]), []);
+});
+
+test("stateAtTime reports the covering interval and when its state began", () => {
+  const { stateAtTime } = dash;
+  const intervals = [ivl(2, 5, true), ivl(5, 8, false)];
+  assert.deepStrictEqual(stateAtTime(intervals, T0 + 3 * H), { on: true, sinceMs: T0 + 2 * H });
+  assert.deepStrictEqual(stateAtTime(intervals, T0 + 7 * H), { on: false, sinceMs: T0 + 5 * H });
+});
+
+test("stateAtTime gives the later interval at a shared boundary", () => {
+  const { stateAtTime } = dash;
+  const intervals = [ivl(2, 5, true), ivl(5, 8, false)];
+  assert.deepStrictEqual(stateAtTime(intervals, T0 + 5 * H), { on: false, sinceMs: T0 + 5 * H });
+  // The closing edge of the final interval still answers.
+  assert.deepStrictEqual(stateAtTime(intervals, T0 + 8 * H), { on: false, sinceMs: T0 + 5 * H });
+});
+
+test("stateAtTime is null outside every interval — unknown, not off", () => {
+  const { stateAtTime } = dash;
+  const intervals = [ivl(2, 5, true)];
+  assert.strictEqual(stateAtTime(intervals, T0 + 1 * H), null);
+  assert.strictEqual(stateAtTime(intervals, T0 + 9 * H), null);
+  assert.strictEqual(stateAtTime([], T0), null);
+  assert.strictEqual(stateAtTime(null, T0), null);
+});
+
+test("fmtDuration renders the two largest units", () => {
+  const { fmtDuration } = dash;
+  assert.strictEqual(fmtDuration(3 * H + 40 * 60000), "3 h 40 m");
+  assert.strictEqual(fmtDuration(2 * 24 * H + 5 * H + 12 * 60000), "2 d 5 h");
+  assert.strictEqual(fmtDuration(45 * 60000), "45 m");
+  assert.strictEqual(fmtDuration(2 * H), "2 h");
+  assert.strictEqual(fmtDuration(24 * H), "1 d");
+  assert.strictEqual(fmtDuration(30 * 1000), "0 m");
+});
+
 test("fixture matches the dashboard API contract", () => {
   assert.strictEqual(typeof fixture.generated_at, "string");
   assert.ok(!Number.isNaN(Date.parse(fixture.generated_at)));

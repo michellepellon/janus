@@ -9,6 +9,7 @@
   --hairline: #ddd;
   --temp: #a63d2f;
   --hum: #33689e;
+  --lights: #8f6a00;
 }
 
 /* Dark tokens apply in two ways — following the OS unless the user pinned
@@ -24,6 +25,7 @@
     --hairline: #3a382e;
     --temp: #c4685a;
     --hum: #5b92d4;
+    --lights: #ac832c;
   }
 }
 
@@ -35,6 +37,7 @@
   --hairline: #3a382e;
   --temp: #c4685a;
   --hum: #5b92d4;
+  --lights: #ac832c;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -356,6 +359,56 @@ svg:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---- lights & outlets ---- */
+
+/* Device rows share the sensor grid so the state strips line up with the
+   climate charts; the tick row reuses the same columns without a rule. */
+.device, .device-ticks {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  column-gap: 3rem;
+}
+
+.device {
+  padding: 1.15rem 0 1.3rem;
+  align-items: center;
+}
+
+.device + .device { border-top: 1px solid var(--hairline); }
+
+.device .name {
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  font-weight: 400;
+  font-size: 1.05rem;
+}
+
+.device .room {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.device .staterow { margin-top: 0.3rem; }
+
+.device .state.ison { color: var(--ink); }
+
+.device .state.isoff, .device .state.unknown { color: var(--muted); }
+
+.device .state.unknown { font-style: italic; font-size: 0.85rem; }
+
+.device .statefor {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.device .strip, .device-ticks .strip { min-width: 0; }
+
+.device-ticks { margin-top: 0.2rem; }
+
+#devices { transition: opacity 0.25s ease; }
+
+#devices.stale { opacity: 0.45; }
+
 /* ---- states & overlays ---- */
 
 .message {
@@ -395,4 +448,8 @@ svg:focus-visible {
   }
   .cooling { grid-template-columns: 1fr; }
   .cooling .charts { grid-column: 1; }
+  .device, .device-ticks {
+    grid-template-columns: 1fr;
+    row-gap: 0.7rem;
+  }
 }
