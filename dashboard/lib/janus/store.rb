@@ -1,11 +1,13 @@
-# ABOUTME: Janus::Store wraps a single DuckDB database file holding sensors and
-# ABOUTME: readings, and serves the windowed, time-bucketed dashboard query.
+# ABOUTME: Janus::Store wraps a single DuckDB database file holding sensors,
+# ABOUTME: readings, and devices, and serves the windowed dashboard queries.
 
 require "duckdb"
 require "fileutils"
+require_relative "db_time"
 
 module Janus
   class Store
+    include DbTime
     # time_bucket alignment origin; passed explicitly to DuckDB so Ruby-side
     # window alignment and SQL bucketing always agree.
     BUCKET_ORIGIN = Time.utc(2000, 1, 1)
@@ -13,10 +15,8 @@ module Janus
     # Hard ceiling on series points per sensor for any window.
     MAX_SERIES_POINTS = 144
 
-    # ruby-duckdb binds Time parameters by wall clock (the zone is dropped) and
-    # returns TIMESTAMP columns as local-zone Time with the stored wall clock.
-    # All writes therefore convert to UTC first, and all reads reinterpret the
-    # returned wall clock as UTC via +as_utc+.
+    # All time handling follows the DbTime convention: writes convert to UTC
+    # first, reads reinterpret the returned wall clock as UTC via +as_utc+.
     def initialize(path:)
       FileUtils.mkdir_p(File.dirname(path))
       @db = DuckDB::Database.open(path)
@@ -38,6 +38,46 @@ module Janus
         SQL
       end
       nil
+    end
+
+    # Upserts one controllable device (a Hue light or smart plug today).
+    # Entity ids are source-prefixed, e.g. "hue.light.<uuid>"; +reachable+ may
+    # be nil when the source does not report reachability.
+    def upsert_device(id:, name:, room:, kind:, source:, reachable:)
+      @mutex.synchronize do
+        @conn.query(<<~SQL, id, name, room, kind, source, reachable, Time.now.getutc)
+          INSERT INTO devices (id, name, room, kind, source, reachable, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT (id) DO UPDATE SET
+            name = excluded.name,
+            room = excluded.room,
+            kind = excluded.kind,
+            source = excluded.source,
+            reachable = excluded.reachable,
+            updated_at = excluded.updated_at
+        SQL
+      end
+      nil
+    end
+
+    # Every known device, ordered by name (mirroring the sensors list).
+    def devices
+      @mutex.synchronize do
+        rows = @conn.query(<<~SQL).to_a
+          SELECT id, name, room, kind, source, reachable FROM devices ORDER BY name
+        SQL
+        rows.map do |(id, name, room, kind, source, reachable)|
+          { id: id, name: name, room: room, kind: kind, source: source, reachable: reachable }
+        end
+      end
+    end
+
+    # Yields the raw DuckDB connection under the store's write mutex, so
+    # companion table owners (Janus::EventLog) share the single writer without
+    # a second connection. The block must not call back into Store methods —
+    # the mutex is not reentrant.
+    def with_connection(&block)
+      @mutex.synchronize { block.call(@conn) }
     end
 
     # Inserts samples (objects responding to observed/temperature/humidity),
@@ -184,6 +224,17 @@ module Janus
             PRIMARY KEY (sensor_id, observed)
           )
         SQL
+        @conn.query(<<~SQL)
+          CREATE TABLE IF NOT EXISTS devices (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            room TEXT,
+            kind TEXT,
+            source TEXT,
+            reachable BOOLEAN,
+            updated_at TIMESTAMP
+          )
+        SQL
       end
     end
 
@@ -234,14 +285,5 @@ module Janus
       BUCKET_ORIGIN + (((offset / bucket_seconds) + 1) * bucket_seconds)
     end
 
-    def normalize_time(value)
-      value.to_time.getutc
-    end
-
-    def as_utc(time)
-      return nil if time.nil?
-
-      Time.utc(time.year, time.mon, time.day, time.hour, time.min, time.sec, time.usec)
-    end
   end
 end
