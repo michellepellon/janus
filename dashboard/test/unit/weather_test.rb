@@ -156,6 +156,7 @@ class WeatherTest < Minitest::Test
     end
     assert_match(/503/, error.message)
     assert_match(/KEFD/, error.message)
+    assert_equal 503, error.status
   end
 
   def test_sensor_identity
