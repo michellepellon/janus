@@ -4,6 +4,8 @@
 require_relative "../test_helper"
 require "janus/app"
 require "janus/event_log"
+require "janus/commander"
+require "janus/hue"
 require "rack/test"
 require "json"
 require "time"
@@ -14,6 +16,24 @@ class AppTest < Minitest::Test
 
   Reading = Data.define(:observed, :temperature, :humidity)
   ISO8601_Z = /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/
+
+  # Records set_light calls; optionally raises a Hue::Error to model a bridge
+  # that rejects the PUT.
+  class StubHue
+    attr_reader :calls
+
+    def initialize(error: nil)
+      @error = error
+      @calls = []
+    end
+
+    def set_light(id, on:)
+      @calls << [id, on]
+      raise @error if @error
+
+      nil
+    end
+  end
 
   def app
     Janus::App
@@ -26,13 +46,28 @@ class AppTest < Minitest::Test
     seed_store(@store)
     Janus::App.set :store, @store
     Janus::App.set :event_log, @event_log
+    set_commander(hue: StubHue.new)
   end
 
   def teardown
     Janus::App.set :store, nil
     Janus::App.set :event_log, nil
+    Janus::App.set :commander, nil
     @store.close
     FileUtils.remove_entry(@tmpdir)
+  end
+
+  # Injects a commander over the shared event log; hue: nil models an
+  # unconfigured bridge.
+  def set_commander(hue:)
+    @hue = hue
+    Janus::App.set :commander, Janus::Commander.new(hue: hue, event_log: @event_log)
+  end
+
+  def seed_device(id: "hue.light.abc")
+    @store.upsert_device(id: id, name: "Porch Light", room: "Outside",
+                         kind: "light", source: "hue", reachable: nil)
+    id
   end
 
   def seed_store(store)
@@ -202,7 +237,9 @@ class AppTest < Minitest::Test
     devices = JSON.parse(last_response.body).fetch("devices")
     assert_equal 1, devices.size
     device = devices.first
-    assert_equal %w[id intervals kind name on room], device.keys.sort
+    assert_equal %w[id intervals kind last_command name on pending room], device.keys.sort
+    assert_equal false, device["pending"], "no command means not pending"
+    assert_nil device["last_command"]
     assert_equal "hue.light.abc", device["id"]
     assert_equal "Porch Light", device["name"]
     assert_equal "Outside", device["room"]
@@ -227,6 +264,121 @@ class AppTest < Minitest::Test
     device = JSON.parse(last_response.body).fetch("devices").first
     assert_nil device["on"]
     assert_equal [], device["intervals"]
+  end
+
+  def test_dashboard_device_reflects_pending_and_last_command
+    id = seed_device
+    now = Time.now.utc
+    @event_log.request(entity: id, action: { on: true }, source: "dashboard", requested_at: now)
+
+    get "/api/dashboard"
+    device = JSON.parse(last_response.body).fetch("devices").first
+    assert_equal true, device["pending"]
+    last = device.fetch("last_command")
+    assert_equal true, last["on"]
+    assert_equal "pending", last["status"]
+    assert_match ISO8601_Z, last["requested_at"]
+    assert_nil last["resolved_at"]
+  end
+
+  def test_toggle_records_a_pending_command_and_calls_the_bridge
+    id = seed_device
+    post "/api/devices/#{id}/toggle", JSON.generate(on: true), "CONTENT_TYPE" => "application/json"
+
+    assert_equal 200, last_response.status
+    assert_match %r{\Aapplication/json}, last_response.content_type
+    body = JSON.parse(last_response.body)
+    assert_equal "pending", body["status"]
+    assert_equal true, body["on"]
+    assert_kind_of Integer, body["command_id"]
+    assert_equal [["abc", true]], @hue.calls
+
+    cmd = @event_log.command(body["command_id"])
+    assert_equal "pending", cmd[:status]
+  end
+
+  def test_toggle_rejects_a_malformed_body
+    id = seed_device
+    ["{}", JSON.generate(on: "yes"), "not json", ""].each do |raw|
+      post "/api/devices/#{id}/toggle", raw, "CONTENT_TYPE" => "application/json"
+      assert_equal 400, last_response.status, "body #{raw.inspect} should be rejected"
+      assert_kind_of String, JSON.parse(last_response.body)["error"]
+    end
+    assert_empty @hue.calls, "a malformed toggle never reaches the bridge"
+  end
+
+  def test_toggle_unknown_device_is_404
+    post "/api/devices/hue.light.nope/toggle", JSON.generate(on: true),
+         "CONTENT_TYPE" => "application/json"
+    assert_equal 404, last_response.status
+    assert_empty @hue.calls
+  end
+
+  def test_toggle_is_409_when_control_is_unconfigured
+    id = seed_device
+    set_commander(hue: nil)
+    post "/api/devices/#{id}/toggle", JSON.generate(on: true), "CONTENT_TYPE" => "application/json"
+
+    assert_equal 409, last_response.status
+    assert_match(/not configured/, JSON.parse(last_response.body)["error"])
+  end
+
+  def test_toggle_is_502_and_echoes_status_when_the_bridge_errors
+    id = seed_device
+    set_commander(hue: StubHue.new(error: Janus::Hue::Error.new("bad light", status: 503)))
+    post "/api/devices/#{id}/toggle", JSON.generate(on: false), "CONTENT_TYPE" => "application/json"
+
+    assert_equal 502, last_response.status
+    body = JSON.parse(last_response.body)
+    assert_equal 503, body["status"]
+    refute_empty body["error"]
+  end
+
+  def test_dashboard_lists_no_toggles_but_still_serves_when_unconfigured
+    seed_device
+    set_commander(hue: nil)
+    get "/api/dashboard"
+    assert_equal 200, last_response.status
+    assert_equal 1, JSON.parse(last_response.body).fetch("devices").size
+  end
+
+  def test_command_endpoint_returns_the_command_fields
+    id = seed_device
+    now = Time.now.utc
+    cid = @event_log.request(entity: id, action: { on: true }, source: "dashboard",
+                             requested_at: now - 5)
+
+    get "/api/commands/#{cid}"
+    assert_equal 200, last_response.status
+    body = JSON.parse(last_response.body)
+    assert_equal %w[detail entity id on requested_at resolved_at status].sort, body.keys.sort
+    assert_equal cid, body["id"]
+    assert_equal id, body["entity"]
+    assert_equal true, body["on"]
+    assert_equal "pending", body["status"]
+    assert_match ISO8601_Z, body["requested_at"]
+    assert_nil body["resolved_at"]
+  end
+
+  def test_command_endpoint_confirms_opportunistically_from_a_state_event
+    id = seed_device
+    now = Time.now.utc
+    cid = @event_log.request(entity: id, action: { on: true }, source: "dashboard",
+                             requested_at: now - 5)
+    @event_log.record(observed: now - 2, source: "hue", entity: id, kind: "state",
+                      payload: { on: true })
+
+    get "/api/commands/#{cid}"
+    body = JSON.parse(last_response.body)
+    assert_equal "confirmed", body["status"], "serving status reconciles pending commands"
+    assert_match ISO8601_Z, body["resolved_at"]
+  end
+
+  def test_command_endpoint_404_for_unknown_id
+    get "/api/commands/999999"
+    assert_equal 404, last_response.status
+    get "/api/commands/not-a-number"
+    assert_equal 404, last_response.status
   end
 
   private

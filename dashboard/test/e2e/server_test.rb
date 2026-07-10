@@ -80,11 +80,34 @@ class ServerE2ETest < Minitest::Test
     assert_equal "light", porch["kind"]
     assert_equal true, porch["on"]
     assert_equal [false, true], porch["intervals"].map { |interval| interval["on"] }
+    assert_equal true, porch["pending"], "the seeded pending command shows on the device"
+    assert_equal false, porch["last_command"]["on"]
+    assert_equal "pending", porch["last_command"]["status"]
 
     assert_equal "400", get("/api/dashboard?hours=48").code
 
     log = File.read(@log_path)
     assert_includes log, "JANUS_COLLECT=off; not collecting"
+  end
+
+  def test_command_status_endpoint_serves_the_pending_command
+    command = get("/api/commands/1")
+    assert_equal "200", command.code
+    body = JSON.parse(command.body)
+    assert_equal 1, body["id"]
+    assert_equal "hue.light.e2e", body["entity"]
+    assert_equal false, body["on"]
+    assert_equal "pending", body["status"]
+    assert_equal "404", get("/api/commands/9999").code
+  end
+
+  def test_toggle_is_unavailable_without_a_configured_bridge
+    uri = URI("http://127.0.0.1:#{@port}/api/devices/hue.light.e2e/toggle")
+    response = Net::HTTP.start(uri.host, uri.port) do |http|
+      http.post(uri.path, JSON.generate(on: false), "Content-Type" => "application/json")
+    end
+    assert_equal "409", response.code, "the e2e server has no Hue env, so control is unconfigured"
+    assert_match(/not configured/, JSON.parse(response.body)["error"])
   end
 
   private
@@ -114,6 +137,10 @@ class ServerE2ETest < Minitest::Test
                      kind: "state", payload: { on: false })
     event_log.record(observed: now - 1800, source: "hue", entity: "hue.light.e2e",
                      kind: "state", payload: { on: true })
+    # A recent pending command (id 1 in a fresh ledger) — the first control
+    # asked for on this device, not yet confirmed.
+    event_log.request(entity: "hue.light.e2e", action: { on: false },
+                      source: "dashboard", requested_at: now)
     store.close
   end
 
