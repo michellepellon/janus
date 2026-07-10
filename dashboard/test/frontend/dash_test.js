@@ -500,6 +500,70 @@ test("fmtDuration renders the two largest units", () => {
   assert.strictEqual(fmtDuration(30 * 1000), "0 m");
 });
 
+test("switchState reads the acting register from a device", () => {
+  const { switchState } = dash;
+  assert.strictEqual(switchState({ on: true, pending: false }), "on");
+  assert.strictEqual(switchState({ on: false, pending: false }), "off");
+  // A device with a command in flight is neither on nor off — it is pending.
+  assert.strictEqual(switchState({ on: true, pending: true }), "pending");
+  assert.strictEqual(switchState({ on: false, pending: true }), "pending");
+  // Unknown recorded state settles the resting switch to off (a switch is binary).
+  assert.strictEqual(switchState({ on: null, pending: false }), "off");
+  assert.strictEqual(switchState({ pending: false }), "off");
+});
+
+test("nextOn flips a committed state and defaults pending/unknown to on", () => {
+  const { nextOn } = dash;
+  assert.strictEqual(nextOn("on"), false);
+  assert.strictEqual(nextOn("off"), true);
+  assert.strictEqual(nextOn("pending"), true);
+});
+
+test("commandReducer opens a pending command on submit", () => {
+  const { commandReducer } = dash;
+  const s = commandReducer(null, { type: "submit", on: true, prior: "off" });
+  assert.deepStrictEqual(s, { phase: "pending", on: true, prior: "off", commandId: null, elapsedMs: 0 });
+});
+
+test("commandReducer records the accepted command id without leaving pending", () => {
+  const { commandReducer } = dash;
+  let s = commandReducer(null, { type: "submit", on: true, prior: "off" });
+  s = commandReducer(s, { type: "accepted", commandId: 42 });
+  assert.strictEqual(s.commandId, 42);
+  assert.strictEqual(s.phase, "pending");
+});
+
+test("commandReducer settles on server status", () => {
+  const { commandReducer } = dash;
+  let s = commandReducer(null, { type: "submit", on: false, prior: "on" });
+  assert.strictEqual(commandReducer(s, { type: "status", status: "pending" }).phase, "pending");
+  assert.strictEqual(commandReducer(s, { type: "status", status: "confirmed" }).phase, "confirmed");
+  assert.strictEqual(commandReducer(s, { type: "status", status: "failed" }).phase, "failed");
+});
+
+test("commandReducer fails a pending command once the cap is reached", () => {
+  const { commandReducer } = dash;
+  let s = commandReducer(null, { type: "submit", on: true, prior: "off" });
+  s = commandReducer(s, { type: "tick", ms: 20000, cap: 35000 });
+  assert.strictEqual(s.phase, "pending");
+  assert.strictEqual(s.elapsedMs, 20000);
+  s = commandReducer(s, { type: "tick", ms: 20000, cap: 35000 });
+  assert.strictEqual(s.phase, "failed");
+});
+
+test("commandReducer ticks and status are inert once settled", () => {
+  const { commandReducer } = dash;
+  const confirmed = { phase: "confirmed", on: true, prior: "off", commandId: 1, elapsedMs: 0 };
+  assert.strictEqual(commandReducer(confirmed, { type: "tick", ms: 99999, cap: 1 }).phase, "confirmed");
+  assert.strictEqual(commandReducer(confirmed, { type: "status", status: "failed" }).phase, "confirmed");
+});
+
+test("commandReducer fails on a transport error", () => {
+  const { commandReducer } = dash;
+  let s = commandReducer(null, { type: "submit", on: true, prior: "off" });
+  assert.strictEqual(commandReducer(s, { type: "error" }).phase, "failed");
+});
+
 test("fixture matches the dashboard API contract", () => {
   assert.strictEqual(typeof fixture.generated_at, "string");
   assert.ok(!Number.isNaN(Date.parse(fixture.generated_at)));
