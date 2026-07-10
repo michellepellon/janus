@@ -1,5 +1,5 @@
-# ABOUTME: Unit tests for Janus::Store — schema, upserts, idempotent reading
-# ABOUTME: inserts, latest_observed, and the windowed/bucketed dashboard query.
+# ABOUTME: Unit tests for Janus::Store — schema, sensor/device upserts, idempotent
+# ABOUTME: reading inserts, latest_observed, and the windowed dashboard queries.
 
 require_relative "../test_helper"
 require "janus/store"
@@ -233,6 +233,50 @@ class StoreTest < Minitest::Test
 
       assert_nil store.latest_outside(hours: 24, now: Time.utc(2026, 7, 9, 12, 0, 0)),
                  "readings older than the window must not count"
+      store.close
+    end
+  end
+
+  def test_devices_empty_by_default
+    with_tmp_db_path do |path|
+      store = Janus::Store.new(path: path)
+      assert_equal [], store.devices
+      store.close
+    end
+  end
+
+  def test_upsert_device_inserts_updates_and_orders_by_name
+    with_tmp_db_path do |path|
+      store = Janus::Store.new(path: path)
+      store.upsert_device(id: "hue.light.b", name: "Porch Light", room: "Outside",
+                          kind: "light", source: "hue", reachable: true)
+      store.upsert_device(id: "hue.light.a", name: "Fountain Outlet", room: "Patio",
+                          kind: "plug", source: "hue", reachable: nil)
+      store.upsert_device(id: "hue.light.b", name: "Porch Lantern", room: "Front Porch",
+                          kind: "light", source: "hue", reachable: false)
+
+      devices = store.devices
+      assert_equal 2, devices.size
+      fountain, porch = devices
+      assert_equal(
+        { id: "hue.light.a", name: "Fountain Outlet", room: "Patio",
+          kind: "plug", source: "hue", reachable: nil },
+        fountain
+      )
+      assert_equal "Porch Lantern", porch[:name]
+      assert_equal "Front Porch", porch[:room]
+      assert_equal false, porch[:reachable]
+      store.close
+    end
+  end
+
+  def test_with_connection_yields_the_shared_connection
+    with_tmp_db_path do |path|
+      store = Janus::Store.new(path: path)
+      count = store.with_connection do |conn|
+        conn.query("SELECT count(*) FROM sensors").first.first
+      end
+      assert_equal 0, count
       store.close
     end
   end

@@ -3,6 +3,7 @@
 
 require_relative "../test_helper"
 require "janus/store"
+require "janus/event_log"
 require "net/http"
 require "json"
 require "socket"
@@ -71,6 +72,15 @@ class ServerE2ETest < Minitest::Test
     assert_operator cooling["now"]["delta"], :>, 0, "seeded outside runs hotter than the house"
     assert_operator cooling["series"].size, :>, 0
 
+    devices = payload.fetch("devices")
+    assert_equal 1, devices.size
+    porch = devices.first
+    assert_equal "Porch Light", porch["name"]
+    assert_equal "Outside", porch["room"]
+    assert_equal "light", porch["kind"]
+    assert_equal true, porch["on"]
+    assert_equal [false, true], porch["intervals"].map { |interval| interval["on"] }
+
     assert_equal "400", get("/api/dashboard?hours=48").code
 
     log = File.read(@log_path)
@@ -97,6 +107,13 @@ class ServerE2ETest < Minitest::Test
     store.insert_readings("nws.KEFD", (0...2).map do |i|
       Reading.new(observed: now - (i * 3600), temperature: 93.0 - i, humidity: 45.0)
     end)
+    event_log = Janus::EventLog.new(store: store)
+    store.upsert_device(id: "hue.light.e2e", name: "Porch Light", room: "Outside",
+                        kind: "light", source: "hue", reachable: nil)
+    event_log.record(observed: now - 7200, source: "hue", entity: "hue.light.e2e",
+                     kind: "state", payload: { on: false })
+    event_log.record(observed: now - 1800, source: "hue", entity: "hue.light.e2e",
+                     kind: "state", payload: { on: true })
     store.close
   end
 

@@ -1,5 +1,5 @@
-// ABOUTME: Renders the Janus home-climate dashboard: fetches /api/dashboard and draws
-// ABOUTME: Tufte-style SVG sparklines with gap-aware segments, hover crosshair, and data tables.
+// ABOUTME: Renders the Janus dashboard: fetches /api/dashboard and draws Tufte-style
+// ABOUTME: SVG sparklines and device on/off strips with crosshair, tooltips, and tables.
 "use strict";
 
 // ---------------------------------------------------------------------------
@@ -270,6 +270,69 @@ function coolingSentence(now) {
     { text: " — not worth opening up" }];
 }
 
+function intervalMs(iv) {
+  return [
+    iv.fromMs !== undefined ? iv.fromMs : Date.parse(iv.from),
+    iv.toMs !== undefined ? iv.toMs : Date.parse(iv.to),
+  ];
+}
+
+// Clip state intervals to the x-domain for drawing: ascending
+// [{fromMs, toMs, on}], dropping intervals entirely outside the domain and
+// any clipped to zero width. Only known state produces a segment.
+function intervalSegments(intervals, xDomain) {
+  var out = [];
+  for (var i = 0; i < (intervals || []).length; i++) {
+    var ms = intervalMs(intervals[i]);
+    var a = Math.max(ms[0], xDomain[0]);
+    var b = Math.min(ms[1], xDomain[1]);
+    if (b <= a) continue;
+    out.push({ fromMs: a, toMs: b, on: intervals[i].on });
+  }
+  return out;
+}
+
+// Stretches of the domain covered by no interval — periods with no recorded
+// state. Rendered as a neutral wash because unknown is not "off".
+function unknownRanges(segments, xDomain) {
+  var out = [];
+  var cursor = xDomain[0];
+  for (var i = 0; i < segments.length; i++) {
+    if (segments[i].fromMs > cursor) out.push({ fromMs: cursor, toMs: segments[i].fromMs });
+    if (segments[i].toMs > cursor) cursor = segments[i].toMs;
+  }
+  if (cursor < xDomain[1]) out.push({ fromMs: cursor, toMs: xDomain[1] });
+  return out;
+}
+
+// State recorded at tMs: {on, sinceMs} where sinceMs is when that state
+// began (clipped to the queried window server-side), or null when no state
+// is recorded there. On a shared boundary the later interval wins — the
+// state changed at that instant.
+function stateAtTime(intervals, tMs) {
+  var list = intervals || [];
+  for (var i = 0; i < list.length; i++) {
+    var ms = intervalMs(list[i]);
+    var last = i === list.length - 1;
+    if (tMs >= ms[0] && (tMs < ms[1] || (last && tMs <= ms[1]))) {
+      return { on: list[i].on, sinceMs: ms[0] };
+    }
+  }
+  return null;
+}
+
+// Compact duration from the two largest units: "3 h 40 m", "2 d 5 h",
+// "45 m"; sub-minute clamps to "0 m".
+function fmtDuration(ms) {
+  var minutes = Math.floor(ms / 60000);
+  var days = Math.floor(minutes / 1440);
+  var hours = Math.floor((minutes % 1440) / 60);
+  var mins = minutes % 60;
+  if (days > 0) return days + " d" + (hours > 0 ? " " + hours + " h" : "");
+  if (hours > 0) return hours + " h" + (mins > 0 ? " " + mins + " m" : "");
+  return mins + " m";
+}
+
 var THEME_MODES = ["auto", "light", "dark"];
 
 // Next mode in the auto -> light -> dark cycle; unknown input counts as auto.
@@ -306,7 +369,7 @@ if (typeof document !== "undefined") {
     var colors = {};
     function readColors() {
       var cs = getComputedStyle(document.documentElement);
-      ["page", "muted", "secondary", "hairline", "temp", "hum"].forEach(function (name) {
+      ["page", "muted", "secondary", "hairline", "temp", "hum", "lights"].forEach(function (name) {
         colors[name] = cs.getPropertyValue("--" + name).trim();
       });
     }
@@ -321,6 +384,8 @@ if (typeof document !== "undefined") {
     var state = { hours: 24, data: null };
     var main = document.getElementById("sensors");
     var coolingEl = document.getElementById("cooling");
+    var devicesModule = document.getElementById("lights-module");
+    var devicesEl = document.getElementById("devices");
     var generatedEl = document.getElementById("generated");
     var themeBtn = document.getElementById("theme");
     var presetsEl = document.getElementById("presets");
@@ -675,6 +740,163 @@ if (typeof document !== "undefined") {
       return strip;
     }
 
+    // The on/off journal strip for one device: on-intervals filled in the
+    // lights amber, known-off left as page background, and unknown stretches
+    // (no recorded state) washed in the hairline color at low opacity —
+    // encoding chosen so absence of data never reads as "off". Crosshair,
+    // tooltip, and keyboard interaction mirror the sensor charts, stepping
+    // across state-change boundaries.
+    function buildStateStrip(device, xDomain, hours) {
+      var height = 28;
+      var wrap = el("div", "stripwrap");
+      var svg = svgEl("svg", {
+        viewBox: "0 0 " + VBW + " " + height,
+        role: "img",
+        tabindex: "0",
+        "aria-label": device.name + " on/off history, " + hoursLabel(hours),
+      });
+      wrap.appendChild(svg);
+
+      var xs = linScale(xDomain, [PAD_X, VBW - PAD_X]);
+      var segments = intervalSegments(device.intervals, xDomain);
+
+      function band(fromMs, toMs, fill, opacity) {
+        svg.appendChild(svgEl("rect", {
+          x: xs(fromMs).toFixed(2),
+          y: "1",
+          width: Math.max(0, xs(toMs) - xs(fromMs)).toFixed(2),
+          height: String(height - 2),
+          fill: fill,
+          "fill-opacity": opacity,
+        }));
+      }
+
+      var gaps = unknownRanges(segments, xDomain);
+      for (var g = 0; g < gaps.length; g++) {
+        band(gaps[g].fromMs, gaps[g].toMs, colors.hairline, "0.3");
+      }
+      for (var s = 0; s < segments.length; s++) {
+        if (segments[s].on) band(segments[s].fromMs, segments[s].toMs, colors.lights, "1");
+      }
+      ["0.5", String(height - 0.5)].forEach(function (y) {
+        svg.appendChild(svgEl("line", {
+          x1: String(PAD_X), x2: String(VBW - PAD_X), y1: y, y2: y,
+          stroke: colors.hairline, "stroke-width": "1",
+        }));
+      });
+
+      var crosshair = svgEl("line", {
+        y1: "0", y2: String(height),
+        stroke: colors.muted, "stroke-width": "1",
+        style: "display:none",
+      });
+      svg.appendChild(crosshair);
+
+      function showAtMs(xMs) {
+        var st = stateAtTime(device.intervals, xMs);
+        if (!st) { clear(); return; }
+        var x = xs(xMs);
+        crosshair.setAttribute("x1", x.toFixed(2));
+        crosshair.setAttribute("x2", x.toFixed(2));
+        crosshair.style.display = "";
+        showTooltip(svg, height, x, height / 2,
+          st.on ? "on" : "off",
+          "since " + fmtTimeShort(new Date(st.sinceMs), hours));
+      }
+      function clear() {
+        activeStop = -1;
+        crosshair.style.display = "none";
+        hideTooltip();
+      }
+
+      // Keyboard stops: each state change plus the end of the record.
+      var stops = segments.map(function (seg) { return seg.fromMs; });
+      if (segments.length > 0) stops.push(segments[segments.length - 1].toMs);
+      var activeStop = -1;
+      function showStop(idx) {
+        if (stops.length === 0) return;
+        activeStop = Math.max(0, Math.min(stops.length - 1, idx));
+        showAtMs(stops[activeStop]);
+      }
+
+      svg.addEventListener("pointermove", function (e) {
+        var rect = svg.getBoundingClientRect();
+        var xVb = ((e.clientX - rect.left) / rect.width) * VBW;
+        showAtMs(xs.invert(xVb));
+      });
+      svg.addEventListener("pointerleave", clear);
+      svg.addEventListener("keydown", function (e) {
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          e.preventDefault();
+          if (activeStop === -1) showStop(stops.length - 1);
+          else showStop(activeStop + (e.key === "ArrowRight" ? 1 : -1));
+        } else if (e.key === "Home") {
+          e.preventDefault();
+          showStop(0);
+        } else if (e.key === "End") {
+          e.preventDefault();
+          showStop(stops.length - 1);
+        } else if (e.key === "Escape") {
+          clear();
+        }
+      });
+      svg.addEventListener("focus", function () { showStop(stops.length - 1); });
+      svg.addEventListener("blur", clear);
+
+      return wrap;
+    }
+
+    function buildDeviceRow(device, xDomain, hours) {
+      var row = el("div", "device");
+
+      var meta = el("div", "meta");
+      meta.appendChild(el("h3", "name", device.name));
+      if (device.room) meta.appendChild(el("div", "room", device.room));
+      var stateRow = el("div", "staterow");
+      if (device.on === null || device.on === undefined) {
+        stateRow.appendChild(el("span", "state unknown", "no record yet"));
+      } else {
+        stateRow.appendChild(el("span", "state " + (device.on ? "ison" : "isoff"),
+          device.on ? "on" : "off"));
+        // How long the current state has held (from the recorded journal,
+        // clipped to the window like everything else on the page).
+        var current = stateAtTime(device.intervals, xDomain[1]);
+        if (current && current.on === device.on) {
+          stateRow.appendChild(el("span", "statefor",
+            " for " + fmtDuration(xDomain[1] - current.sinceMs)));
+        }
+      }
+      meta.appendChild(stateRow);
+      row.appendChild(meta);
+
+      var strip = el("div", "strip");
+      strip.appendChild(buildStateStrip(device, xDomain, hours));
+      row.appendChild(strip);
+      return row;
+    }
+
+    // The lights & outlets module renders only when devices exist; a house
+    // without a paired bridge never sees an empty shell.
+    function renderDevices(devices, xDomain, hours) {
+      devicesEl.textContent = "";
+      if (!devices || devices.length === 0) {
+        devicesModule.hidden = true;
+        return;
+      }
+      devicesModule.hidden = false;
+      devicesEl.classList.remove("stale");
+      for (var i = 0; i < devices.length; i++) {
+        devicesEl.appendChild(buildDeviceRow(devices[i], xDomain, hours));
+      }
+      // One sparse tick row for the whole module, aligned with the strips.
+      var ticksRow = el("div", "device-ticks");
+      ticksRow.appendChild(el("div"));
+      var strip = el("div", "strip");
+      strip.appendChild(buildTicksRow(xDomain, hours));
+      ticksRow.appendChild(strip);
+      devicesEl.appendChild(ticksRow);
+    }
+
     function hoursLabel(hours) {
       if (hours <= 24) return "24 hours";
       return (hours / 24) + " days";
@@ -692,6 +914,8 @@ if (typeof document !== "undefined") {
       main.textContent = "";
       main.appendChild(el("div", "message", text));
       main.classList.remove("stale");
+      devicesEl.textContent = "";
+      devicesModule.hidden = true;
     }
 
     function render(data) {
@@ -706,12 +930,14 @@ if (typeof document !== "undefined") {
         openTables[d.dataset.sensorId] = true;
       });
       main.textContent = "";
-      if (!data.sensors || data.sensors.length === 0) {
-        showMessage("No readings yet — add SensorPush credentials to .env and run bin/collect.");
-        return;
-      }
       var endMs = Date.parse(data.generated_at);
       var xDomain = [endMs - data.hours * 3600 * 1000, endMs];
+      if (!data.sensors || data.sensors.length === 0) {
+        showMessage("No readings yet — add SensorPush credentials to .env and run bin/collect.");
+        renderDevices(data.devices, xDomain, data.hours);
+        return;
+      }
+      renderDevices(data.devices, xDomain, data.hours);
       coolingEl.textContent = "";
       if (data.cooling && data.cooling.series && data.cooling.series.length > 0) {
         coolingEl.appendChild(buildCoolingStrip(data.cooling, xDomain, data.hours));
@@ -741,6 +967,7 @@ if (typeof document !== "undefined") {
       if (dim) {
         main.classList.add("stale");
         coolingEl.classList.add("stale");
+        devicesEl.classList.add("stale");
       }
       fetch("/api/dashboard?hours=" + hours)
         .then(function (res) {
@@ -756,6 +983,7 @@ if (typeof document !== "undefined") {
           if (!state.data) { showMessage("Can't reach the server."); return; }
           main.classList.remove("stale");
           coolingEl.classList.remove("stale");
+          devicesEl.classList.remove("stale");
           if (!generatedEl.querySelector(".updatefail")) {
             generatedEl.appendChild(el("span", "updatefail", " · update failed — retrying"));
           }
@@ -839,5 +1067,9 @@ if (typeof module !== "undefined") {
     splitAtZero: splitAtZero,
     coolingSentence: coolingSentence,
     nextTheme: nextTheme,
+    intervalSegments: intervalSegments,
+    unknownRanges: unknownRanges,
+    stateAtTime: stateAtTime,
+    fmtDuration: fmtDuration,
   };
 }

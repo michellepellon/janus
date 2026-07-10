@@ -28,6 +28,15 @@
       <div id="cooling"></div>
       <div id="sensors"></div>
     </section>
+    <!-- Hidden until /api/dashboard reports devices (a paired Hue bridge).
+         The time-range presets stay global in the climate module head and
+         drive this module's window too. -->
+    <section class="module" id="lights-module" aria-labelledby="lights-title" hidden>
+      <div class="module-head">
+        <h2 class="module-title" id="lights-title">lights &amp; outlets</h2>
+      </div>
+      <div id="devices"></div>
+    </section>
   </main>
 </div>
 <div id="tooltip" class="tooltip" role="status"><span class="val"></span><span class="time"></span></div>

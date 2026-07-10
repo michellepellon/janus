@@ -3,6 +3,7 @@
 
 require_relative "../test_helper"
 require "janus/app"
+require "janus/event_log"
 require "rack/test"
 require "json"
 require "time"
@@ -21,12 +22,15 @@ class AppTest < Minitest::Test
   def setup
     @tmpdir = Dir.mktmpdir("janus-app-test")
     @store = Janus::Store.new(path: File.join(@tmpdir, "janus.duckdb"))
+    @event_log = Janus::EventLog.new(store: @store)
     seed_store(@store)
     Janus::App.set :store, @store
+    Janus::App.set :event_log, @event_log
   end
 
   def teardown
     Janus::App.set :store, nil
+    Janus::App.set :event_log, nil
     @store.close
     FileUtils.remove_entry(@tmpdir)
   end
@@ -88,7 +92,7 @@ class AppTest < Minitest::Test
     get "/api/dashboard"
     body = JSON.parse(last_response.body)
 
-    assert_equal %w[cooling generated_at hours sensors], body.keys.sort
+    assert_equal %w[cooling devices generated_at hours sensors], body.keys.sort
     assert_match ISO8601_Z, body["generated_at"]
     assert_equal 24, body["hours"]
 
@@ -178,6 +182,51 @@ class AppTest < Minitest::Test
     assert_operator now["delta"], :<, 0
     assert_operator now["dew_point"], :>, 63.0
     assert_equal false, now["free_cooling"]
+  end
+
+  def test_devices_default_to_an_empty_array
+    get "/api/dashboard"
+    assert_equal [], JSON.parse(last_response.body).fetch("devices")
+  end
+
+  def test_devices_carry_state_and_windowed_intervals
+    now = Time.now.utc
+    @store.upsert_device(id: "hue.light.abc", name: "Porch Light", room: "Outside",
+                         kind: "light", source: "hue", reachable: nil)
+    @event_log.record(observed: now - 7200, source: "hue", entity: "hue.light.abc",
+                      kind: "state", payload: { on: true })
+    @event_log.record(observed: now - 600, source: "hue", entity: "hue.light.abc",
+                      kind: "state", payload: { on: false })
+
+    get "/api/dashboard"
+    devices = JSON.parse(last_response.body).fetch("devices")
+    assert_equal 1, devices.size
+    device = devices.first
+    assert_equal %w[id intervals kind name on room], device.keys.sort
+    assert_equal "hue.light.abc", device["id"]
+    assert_equal "Porch Light", device["name"]
+    assert_equal "Outside", device["room"]
+    assert_equal "light", device["kind"]
+    assert_equal false, device["on"]
+
+    intervals = device["intervals"]
+    assert_equal 2, intervals.size
+    intervals.each do |interval|
+      assert_equal %w[from on to], interval.keys.sort
+      assert_match ISO8601_Z, interval["from"]
+      assert_match ISO8601_Z, interval["to"]
+    end
+    assert_equal [true, false], intervals.map { |interval| interval["on"] }
+    assert_equal intervals[0]["to"], intervals[1]["from"], "intervals abut at the state change"
+  end
+
+  def test_device_without_state_events_reads_as_unknown_not_off
+    @store.upsert_device(id: "hue.light.new", name: "Lamp", room: "Living Room",
+                         kind: "light", source: "hue", reachable: nil)
+    get "/api/dashboard"
+    device = JSON.parse(last_response.body).fetch("devices").first
+    assert_nil device["on"]
+    assert_equal [], device["intervals"]
   end
 
   private

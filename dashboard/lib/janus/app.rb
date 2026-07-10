@@ -5,6 +5,7 @@ require "sinatra/base"
 require "json"
 require "time"
 require_relative "store"
+require_relative "event_log"
 require_relative "dew_point"
 
 module Janus
@@ -34,6 +35,13 @@ module Janus
       settings.store
     end
 
+    # The shared EventLog over the same store, lazily opened the same way so
+    # tests can inject their own before first use.
+    def self.event_log
+      set :event_log, EventLog.new(store: store)
+      settings.event_log
+    end
+
     get "/healthz" do
       content_type "text/plain"
       "ok"
@@ -52,7 +60,8 @@ module Janus
         generated_at: Time.now.getutc.iso8601,
         hours: hours,
         sensors: rows.map { |row| serialize_sensor(row) },
-        cooling: serialize_cooling(rows, hours)
+        cooling: serialize_cooling(rows, hours),
+        devices: serialize_devices(hours)
       )
     end
 
@@ -142,6 +151,31 @@ module Janus
         dew_point: round1(dew_point),
         free_cooling: delta.negative? && !dew_point.nil? && dew_point <= FREE_COOLING_MAX_DEW_POINT
       }
+    end
+
+    # Devices with their windowed on/off journal. Always an array; empty until
+    # a source (Hue today) has registered devices — the frontend hides the
+    # module entirely then. Intervals are looked up for every entity at once
+    # and joined by device id; a device with no state events gets on: nil and
+    # no intervals. Absence of events is unknown, never "off".
+    def serialize_devices(hours)
+      devices = self.class.store.devices
+      return [] if devices.empty?
+
+      intervals_by_entity = self.class.event_log.state_intervals(entity_prefix: "", hours: hours)
+      devices.map do |device|
+        latest = self.class.event_log.latest_state(entity: device[:id])
+        {
+          id: device[:id],
+          name: device[:name],
+          room: device[:room],
+          kind: device[:kind],
+          on: latest && latest[:on],
+          intervals: (intervals_by_entity[device[:id]] || []).map do |interval|
+            { from: interval[:from].iso8601, to: interval[:to].iso8601, on: interval[:on] }
+          end
+        }
+      end
     end
 
     def outside?(sensor_id)
