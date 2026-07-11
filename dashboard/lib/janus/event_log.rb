@@ -149,10 +149,12 @@ module Janus
 
     # Per-entity on/off intervals over the trailing +hours+ ending at +now+,
     # derived from kind='state' events carrying a payload.on boolean:
-    # { entity => ascending [{from:, to:, on:}] }. A state persisting from
-    # before the window is clipped to the window start; the interval holding
-    # at +now+ closes at now. Entities with no state events are absent —
-    # absence of events is unknown, never "off".
+    # { entity => ascending [{from:, to:, on:, clipped:}] }. A state persisting
+    # from before the window is clipped to the window start and marked
+    # clipped: true — its +from+ is the window edge, not when the state began —
+    # so consumers can say "since before" rather than presenting the edge as
+    # the start. The interval holding at +now+ closes at now. Entities with no
+    # state events are absent — absence of events is unknown, never "off".
     def state_intervals(entity_prefix:, hours:, now: Time.now.getutc)
       now = now.getutc
       window_start = now - (hours * 3600)
@@ -224,19 +226,20 @@ module Janus
     # Folds per-entity (time, on) change points into closed intervals.
     # Consecutive events with the same state extend the open interval, so the
     # journal tolerates re-recorded states without producing zero-information
-    # boundaries.
+    # boundaries. A point carried in from before the window opens a clipped
+    # interval — its true start predates the window edge it is pinned to.
     def build_intervals(carried, rows, window_start, now)
       changes = Hash.new { |hash, key| hash[key] = [] }
-      carried.each { |(entity, on)| changes[entity] << [window_start, on] }
-      rows.each { |(entity, observed, on)| changes[entity] << [as_utc(observed), on] }
+      carried.each { |(entity, on)| changes[entity] << [window_start, on, true] }
+      rows.each { |(entity, observed, on)| changes[entity] << [as_utc(observed), on, false] }
 
       changes.transform_values do |points|
         intervals = []
-        points.each do |(at, on)|
+        points.each do |(at, on, clipped)|
           next if intervals.any? && intervals.last[:on] == on
 
           intervals.last[:to] = at if intervals.any?
-          intervals << { from: at, to: nil, on: on }
+          intervals << { from: at, to: nil, on: on, clipped: clipped }
         end
         intervals.last[:to] = now
         intervals
