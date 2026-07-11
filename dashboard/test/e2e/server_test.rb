@@ -4,6 +4,7 @@
 require_relative "../test_helper"
 require "janus/store"
 require "janus/event_log"
+require "janus/schedules"
 require "net/http"
 require "json"
 require "socket"
@@ -84,6 +85,22 @@ class ServerE2ETest < Minitest::Test
     assert_equal false, porch["last_command"]["on"]
     assert_equal "pending", porch["last_command"]["status"]
 
+    schedule = porch.fetch("schedule")
+    assert_equal "19:00", schedule["on_time"]
+    assert_equal "23:00", schedule["off_time"]
+    assert_equal Janus::Schedules::DAYS, schedule["days"]
+    assert_equal true, schedule["enabled"]
+
+    adherence = porch.fetch("adherence")
+    assert_equal %w[deviations expected marks], adherence.keys.sort
+    assert_equal 1, adherence["deviations"]
+    assert_equal 1, adherence["marks"].size
+    assert_match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*Z/, adherence["marks"].first["t"])
+    refute_empty adherence["expected"], "a daily 19:00-23:00 span falls inside any 24 h window"
+    adherence["expected"].each do |interval|
+      assert_operator Time.parse(interval["from"]), :<, Time.parse(interval["to"])
+    end
+
     assert_equal "400", get("/api/dashboard?hours=48").code
 
     log = File.read(@log_path)
@@ -99,6 +116,36 @@ class ServerE2ETest < Minitest::Test
     assert_equal false, body["on"]
     assert_equal "pending", body["status"]
     assert_equal "404", get("/api/commands/9999").code
+  end
+
+  def test_schedules_api_round_trips_over_live_http
+    index = get("/api/schedules")
+    assert_equal "200", index.code
+    rows = JSON.parse(index.body)
+    assert_equal ["hue.light.e2e"], rows.map { |row| row["entity"] }
+
+    uri = URI("http://127.0.0.1:#{@port}/api/schedules/hue.light.e2e")
+    updated = Net::HTTP.start(uri.host, uri.port) do |http|
+      http.put(uri.path, JSON.generate(on_time: "20:00", off_time: "23:30",
+                                       days: %w[fri sat], enabled: true),
+               "Content-Type" => "application/json")
+    end
+    assert_equal "200", updated.code
+    body = JSON.parse(updated.body)
+    assert_equal "20:00", body["on_time"]
+    assert_equal %w[fri sat], body["days"]
+
+    invalid = Net::HTTP.start(uri.host, uri.port) do |http|
+      http.put(uri.path, JSON.generate(on_time: "20:00", off_time: "20:00",
+                                       days: %w[fri], enabled: true),
+               "Content-Type" => "application/json")
+    end
+    assert_equal "422", invalid.code
+    assert_kind_of String, JSON.parse(invalid.body).dig("errors", "off_time")
+
+    deleted = Net::HTTP.start(uri.host, uri.port) { |http| http.delete(uri.path) }
+    assert_equal "204", deleted.code
+    assert_equal [], JSON.parse(get("/api/schedules").body)
   end
 
   def test_toggle_is_unavailable_without_a_configured_bridge
@@ -141,6 +188,12 @@ class ServerE2ETest < Minitest::Test
     # asked for on this device, not yet confirmed.
     event_log.request(entity: "hue.light.e2e", action: { on: false },
                       source: "dashboard", requested_at: now)
+    schedules = Janus::Schedules.new(store: store)
+    schedules.upsert(entity: "hue.light.e2e", on_time: "19:00", off_time: "23:00",
+                     days: Janus::Schedules::DAYS.dup, enabled: true)
+    event_log.record(observed: now - 5400, source: "janus", entity: "hue.light.e2e",
+                     kind: "deviation",
+                     payload: { expected: true, observed: false, since: (now - 5700).iso8601 })
     store.close
   end
 

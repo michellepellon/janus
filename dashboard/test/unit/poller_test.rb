@@ -5,6 +5,7 @@
 require_relative "../test_helper"
 require "janus/store"
 require "janus/event_log"
+require "janus/schedules"
 require "janus/poller"
 require "stringio"
 
@@ -58,17 +59,24 @@ class PollerTest < Minitest::Test
 
   # Hue stub whose lights() call signals a Queue, mirroring SignalingClient;
   # open_event_stream parks forever so the stream thread stays quiet.
+  # set_light records schedule-enforcement commands and signals its own Queue.
   class SignalingHue
-    attr_reader :stream_opens
+    attr_reader :stream_opens, :set_light_calls
 
     def initialize(queue)
       @queue = queue
       @stream_opens = Queue.new
+      @set_light_calls = Queue.new
     end
 
     def lights
       @queue << :hue
       []
+    end
+
+    def set_light(id, on:)
+      @set_light_calls << [id, on]
+      nil
     end
 
     def open_event_stream
@@ -218,6 +226,63 @@ class PollerTest < Minitest::Test
         sleep 0.02 until event_log.command(cid)[:status] == "confirmed" || Time.now > deadline
         assert_equal "confirmed", event_log.command(cid)[:status],
                      "the observed state event confirms the pending command via reconcile"
+      ensure
+        thread.kill
+        thread.join
+      end
+    end
+  end
+
+  def test_start_enforces_schedules_through_the_bridge_each_hue_cycle
+    with_store do |store|
+      queue = Queue.new
+      event_log = Janus::EventLog.new(store: store)
+      schedules = Janus::Schedules.new(store: store)
+      # A schedule whose most recent edge says "on" while the recorded state
+      # says off, so the first cycle's enforcement must command the bridge.
+      # Anchored around now (an overnight span when it crosses midnight) so
+      # the test holds at any wall-clock time.
+      now = Time.now
+      schedules.upsert(entity: "hue.light.s",
+                       on_time: (now - 7200).strftime("%H:%M"),
+                       off_time: (now + 7200).strftime("%H:%M"),
+                       days: Janus::Schedules::DAYS.dup, enabled: true)
+      event_log.record(observed: Time.now.getutc - 3600, source: "hue",
+                       entity: "hue.light.s", kind: "state", payload: { on: false })
+
+      hue = SignalingHue.new(queue)
+      thread = Janus::Poller.start(
+        store: store, event_log: event_log, schedules: schedules, interval: 0.01,
+        hue_factory: proc { hue }, sensorpush: false, hue: true, hue_stream: false,
+        logger_io: StringIO.new
+      )
+      begin
+        assert_equal ["s", true], hue.set_light_calls.pop(timeout: 2)
+        command = event_log.latest_command(entity: "hue.light.s")
+        refute_nil command
+        assert_equal true, command[:on]
+        assert_equal "schedule", event_log.command(command[:id])[:source]
+      ensure
+        thread.kill
+        thread.join
+      end
+    end
+  end
+
+  def test_start_without_schedules_never_touches_the_ledger
+    with_store do |store|
+      queue = Queue.new
+      event_log = Janus::EventLog.new(store: store)
+      hue = SignalingHue.new(queue)
+      thread = Janus::Poller.start(
+        store: store, event_log: event_log, interval: 0.01,
+        hue_factory: proc { hue }, sensorpush: false, hue: true, hue_stream: false,
+        logger_io: StringIO.new
+      )
+      begin
+        queue.pop(timeout: 2)
+        queue.pop(timeout: 2)
+        assert_nil event_log.latest_command(entity: "hue.light.s")
       ensure
         thread.kill
         thread.join

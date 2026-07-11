@@ -285,10 +285,11 @@ svg:focus-visible {
 /* ---- readings table ---- */
 
 /* The disclosure reads as the quiet third element of the chart column:
-   temperature, humidity, readings. */
+   temperature, humidity, readings. The schedule editor borrows the same
+   idiom, so the two disclosures share these rules. */
 .datatable { margin-top: 1.6rem; }
 
-.datatable summary {
+.datatable summary, .schededitor summary {
   color: var(--muted);
   font-size: 0.85rem;
   cursor: pointer;
@@ -296,20 +297,22 @@ svg:focus-visible {
   list-style: none;
 }
 
-.datatable summary::-webkit-details-marker { display: none; }
+.datatable summary::-webkit-details-marker,
+.schededitor summary::-webkit-details-marker { display: none; }
 
-.datatable summary::before {
+.datatable summary::before, .schededitor summary::before {
   content: "›";
   display: inline-block;
   margin-right: 0.4rem;
   transition: transform 0.15s ease;
 }
 
-.datatable[open] summary::before { transform: rotate(90deg); }
+.datatable[open] summary::before,
+.schededitor[open] summary::before { transform: rotate(90deg); }
 
-.datatable summary:hover { color: var(--secondary); }
+.datatable summary:hover, .schededitor summary:hover { color: var(--secondary); }
 
-.datatable summary:focus-visible {
+.datatable summary:focus-visible, .schededitor summary:focus-visible {
   color: var(--secondary);
   outline: 1px dotted var(--muted);
   outline-offset: 6px;
@@ -448,10 +451,12 @@ svg:focus-visible {
 @keyframes cmdpulse { 50% { opacity: 0.4; } }
 
 /* Reduced motion: the pending outline still reads as "in between", but nothing
-   moves or pulses. */
+   moves or pulses, and the disclosures open without easing or fading. */
 @media (prefers-reduced-motion: reduce) {
   .device .switch, .device .switch .knob { transition: none; }
   .device .switch.pending .knob { animation: none; }
+  .datatable summary::before, .schededitor summary::before { transition: none; }
+  .datatable[open] .tablescroll, .schededitor[open] .schedbody { animation: none; }
 }
 
 .device .staterow { margin-top: 0.3rem; }
@@ -477,6 +482,135 @@ svg:focus-visible {
 .device .strip, .device-ticks .strip { min-width: 0; }
 
 .device-ticks { margin-top: 0.2rem; }
+
+/* ---- schedules ---- */
+
+/* The expected-on track sits just under the recorded strip, sharing its
+   x-domain; the muted outline keeps it subordinate to the amber record. */
+.device .expectedtrack { margin-top: 3px; }
+
+/* The quiet deviation tally at the strip column's right edge. */
+.device .devnote {
+  text-align: right;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 0.2rem;
+}
+
+.schededitor { margin-top: 0.5rem; }
+
+.schededitor .schedbody {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.55rem;
+  font-size: 0.85rem;
+}
+
+.schededitor[open] .schedbody { animation: tablefade 0.2s ease; }
+
+.schededitor label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  color: var(--muted);
+}
+
+.schedtimes {
+  display: flex;
+  align-items: baseline;
+  gap: 1.1rem;
+  flex-wrap: wrap;
+}
+
+.schededitor input[type="time"] {
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--ink);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--hairline);
+  border-radius: 0;
+  padding: 0 0 1px;
+}
+
+.schededitor input[type="time"]:focus-visible {
+  outline: 1px dotted var(--muted);
+  outline-offset: 3px;
+}
+
+.scheddays {
+  display: flex;
+  align-items: center;
+  gap: 0.22rem;
+  flex-wrap: wrap;
+}
+
+/* Single-letter day toggles: hairline chips that fill with the lights amber
+   when the day is in the schedule. Sized so the whole week fits the meta
+   column on one row. */
+.daychip {
+  width: 1.35rem;
+  height: 1.35rem;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.daychip:hover { border-color: var(--muted); }
+
+.daychip.active {
+  background: var(--lights);
+  border-color: var(--lights);
+  color: var(--page);
+}
+
+.daychip:focus-visible {
+  outline: 1px dotted var(--muted);
+  outline-offset: 3px;
+}
+
+.schedenabled input { accent-color: var(--lights); }
+
+.schedactions {
+  display: flex;
+  align-items: baseline;
+  gap: 1.1rem;
+}
+
+/* Quiet text buttons, in the same voice as the theme toggle. */
+.schedbtn {
+  background: none;
+  border: none;
+  padding: 0 0 1px;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.schedbtn:hover { color: var(--secondary); }
+
+.schedbtn:focus-visible {
+  color: var(--secondary);
+  outline: 1px dotted var(--muted);
+  outline-offset: 6px;
+}
+
+.schedbtn:disabled { cursor: default; font-style: italic; }
+
+/* Inline validation, field-adjacent, in a muted red. */
+.fielderror {
+  color: var(--temp);
+  font-size: 0.8rem;
+  font-style: italic;
+}
 
 #devices { transition: opacity 0.25s ease; }
 

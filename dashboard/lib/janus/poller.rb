@@ -9,6 +9,7 @@ require_relative "weather_collector"
 require_relative "hue"
 require_relative "hue_recorder"
 require_relative "commander"
+require_relative "schedule_runner"
 
 module Janus
   class Poller
@@ -35,8 +36,12 @@ module Janus
     # appends one audit event (source 'janus', kind 'collection') with the
     # collector's counts. Hue additionally follows the bridge's SSE feed on
     # its own thread (see HueRecorder#start_stream); that thread manages its
-    # own reconnects, so it is started once and left alone. Returns the Thread.
-    def self.start(store:, event_log: nil, interval: Integer(ENV.fetch("JANUS_POLL_SECONDS", "300")),
+    # own reconnects, so it is started once and left alone. When +schedules+
+    # is given, each hue cycle also runs schedule enforcement and adherence
+    # (see ScheduleRunner) through a Commander wired to the bridge. Returns
+    # the Thread.
+    def self.start(store:, event_log: nil, schedules: nil,
+                   interval: Integer(ENV.fetch("JANUS_POLL_SECONDS", "300")),
                    client_factory: DEFAULT_CLIENT_FACTORY,
                    weather_factory: DEFAULT_WEATHER_FACTORY,
                    hue_factory: DEFAULT_HUE_FACTORY,
@@ -50,6 +55,7 @@ module Janus
         hue_recorder = nil
         hue_stream_thread = nil
         commander = nil
+        schedule_runner = nil
         loop do
           if sensorpush
             begin
@@ -77,8 +83,18 @@ module Janus
           if hue
             begin
               if hue_recorder.nil?
-                hue_recorder = HueRecorder.new(hue: hue_factory.call, store: store, event_log: event_log)
+                hue_client = hue_factory.call
+                hue_recorder = HueRecorder.new(hue: hue_client, store: store, event_log: event_log)
                 hue_stream_thread ||= hue_recorder.start_stream(logger_io: logger_io) if hue_stream
+                # The runner keeps in-memory edge/mismatch state, so it is
+                # built once (with the first bridge client) and kept across
+                # hue rebuilds; its own per-device rescue contains errors.
+                if schedules && schedule_runner.nil?
+                  schedule_runner = ScheduleRunner.new(
+                    schedules: schedules, event_log: event_log, logger_io: logger_io,
+                    commander: Commander.new(hue: hue_client, event_log: event_log, source: "schedule")
+                  )
+                end
               end
               result = hue_recorder.run_once
               record_collection(event_log, "hue", result)
@@ -91,6 +107,9 @@ module Janus
                 logger_io.puts "[#{Time.now.getutc.iso8601}] poller: hue commands " \
                                "confirmed=#{reconciled[:confirmed]} failed=#{reconciled[:failed]}"
               end
+              # Schedule times are local wall clock, so the runner evaluates
+              # in the server's zone.
+              schedule_runner&.run_cycle(now: Time.now)
             rescue StandardError => e
               hue_recorder = nil
               logger_io.puts "[#{Time.now.getutc.iso8601}] poller: hue: #{e.class}: #{e.message}"

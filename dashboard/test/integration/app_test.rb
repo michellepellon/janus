@@ -4,6 +4,7 @@
 require_relative "../test_helper"
 require "janus/app"
 require "janus/event_log"
+require "janus/schedules"
 require "janus/commander"
 require "janus/hue"
 require "rack/test"
@@ -43,15 +44,18 @@ class AppTest < Minitest::Test
     @tmpdir = Dir.mktmpdir("janus-app-test")
     @store = Janus::Store.new(path: File.join(@tmpdir, "janus.duckdb"))
     @event_log = Janus::EventLog.new(store: @store)
+    @schedules = Janus::Schedules.new(store: @store)
     seed_store(@store)
     Janus::App.set :store, @store
     Janus::App.set :event_log, @event_log
+    Janus::App.set :schedules, @schedules
     set_commander(hue: StubHue.new)
   end
 
   def teardown
     Janus::App.set :store, nil
     Janus::App.set :event_log, nil
+    Janus::App.set :schedules, nil
     Janus::App.set :commander, nil
     @store.close
     FileUtils.remove_entry(@tmpdir)
@@ -237,7 +241,8 @@ class AppTest < Minitest::Test
     devices = JSON.parse(last_response.body).fetch("devices")
     assert_equal 1, devices.size
     device = devices.first
-    assert_equal %w[id intervals kind last_command name on pending room], device.keys.sort
+    assert_equal %w[adherence id intervals kind last_command name on pending room schedule],
+                 device.keys.sort
     assert_equal false, device["pending"], "no command means not pending"
     assert_nil device["last_command"]
     assert_equal "hue.light.abc", device["id"]
@@ -379,6 +384,135 @@ class AppTest < Minitest::Test
     assert_equal 404, last_response.status
     get "/api/commands/not-a-number"
     assert_equal 404, last_response.status
+  end
+
+  # ---- schedules API ----
+
+  SCHEDULE_BODY = {
+    on_time: "19:00", off_time: "23:00", days: %w[mon tue wed thu fri sat sun], enabled: true
+  }.freeze
+
+  def put_schedule(id, body)
+    put "/api/schedules/#{id}", JSON.generate(body), "CONTENT_TYPE" => "application/json"
+  end
+
+  def test_schedules_index_is_empty_then_lists_rows
+    get "/api/schedules"
+    assert_equal 200, last_response.status
+    assert_equal [], JSON.parse(last_response.body)
+
+    id = seed_device
+    @schedules.upsert(entity: id, **SCHEDULE_BODY)
+    get "/api/schedules"
+    rows = JSON.parse(last_response.body)
+    assert_equal 1, rows.size
+    row = rows.first
+    assert_equal %w[created_at days enabled entity off_time on_time updated_at], row.keys.sort
+    assert_equal id, row["entity"]
+    assert_equal "19:00", row["on_time"]
+    assert_equal SCHEDULE_BODY[:days], row["days"]
+    assert_equal true, row["enabled"]
+    assert_match ISO8601_Z, row["created_at"]
+  end
+
+  def test_put_schedule_upserts_and_returns_the_row
+    id = seed_device
+    put_schedule(id, SCHEDULE_BODY)
+    assert_equal 200, last_response.status
+    assert_match %r{\Aapplication/json}, last_response.content_type
+    row = JSON.parse(last_response.body)
+    assert_equal id, row["entity"]
+    assert_equal "23:00", row["off_time"]
+
+    put_schedule(id, SCHEDULE_BODY.merge(on_time: "20:30", enabled: false))
+    assert_equal 200, last_response.status
+    assert_equal "20:30", JSON.parse(last_response.body)["on_time"]
+    assert_equal 1, @schedules.all.size
+  end
+
+  def test_put_schedule_validation_failure_is_422_with_field_errors
+    id = seed_device
+    put_schedule(id, SCHEDULE_BODY.merge(on_time: "25:00", days: []))
+    assert_equal 422, last_response.status
+    errors = JSON.parse(last_response.body).fetch("errors")
+    assert_kind_of String, errors["on_time"]
+    assert_kind_of String, errors["days"]
+    assert_nil @schedules.fetch(id)
+  end
+
+  def test_put_schedule_rejects_malformed_bodies_without_500
+    id = seed_device
+    ["not json", "", "[1,2]", JSON.generate(on_time: "19:00")].each do |raw|
+      put "/api/schedules/#{id}", raw, "CONTENT_TYPE" => "application/json"
+      assert_includes [400, 422], last_response.status, "body #{raw.inspect}"
+      body = JSON.parse(last_response.body)
+      assert body["error"] || body["errors"], "an honest error body for #{raw.inspect}"
+    end
+  end
+
+  def test_put_schedule_unknown_device_is_404
+    put_schedule("hue.light.nope", SCHEDULE_BODY)
+    assert_equal 404, last_response.status
+  end
+
+  def test_delete_schedule_removes_and_404s_when_absent
+    id = seed_device
+    @schedules.upsert(entity: id, **SCHEDULE_BODY)
+    delete "/api/schedules/#{id}"
+    assert_equal 204, last_response.status
+    assert_nil @schedules.fetch(id)
+    delete "/api/schedules/#{id}"
+    assert_equal 404, last_response.status
+  end
+
+  def test_dashboard_device_without_schedule_has_null_schedule_and_adherence
+    seed_device
+    get "/api/dashboard"
+    device = JSON.parse(last_response.body).fetch("devices").first
+    assert device.key?("schedule")
+    assert_nil device["schedule"]
+    assert_nil device["adherence"]
+  end
+
+  def test_dashboard_device_carries_schedule_and_adherence
+    id = seed_device
+    @schedules.upsert(entity: id, **SCHEDULE_BODY)
+    now = Time.now.utc
+    @event_log.record(observed: now - 7200, source: "janus", entity: id, kind: "deviation",
+                      payload: { expected: true, observed: false,
+                                 since: (now - 7500).iso8601 })
+
+    get "/api/dashboard"
+    device = JSON.parse(last_response.body).fetch("devices").first
+    schedule = device.fetch("schedule")
+    assert_equal "19:00", schedule["on_time"]
+    assert_equal SCHEDULE_BODY[:days], schedule["days"]
+
+    adherence = device.fetch("adherence")
+    assert_equal %w[deviations expected marks], adherence.keys.sort
+    assert_equal 1, adherence["deviations"]
+    assert_equal 1, adherence["marks"].size
+    assert_match ISO8601_Z, adherence["marks"].first.fetch("t")
+
+    expected = adherence["expected"]
+    refute_empty expected, "a daily schedule expects on-time inside any 24 h window"
+    expected.each do |interval|
+      assert_equal %w[from to], interval.keys.sort
+      assert_match ISO8601_Z, interval["from"]
+      assert_operator Time.parse(interval["from"]), :<, Time.parse(interval["to"])
+    end
+    froms = expected.map { |interval| interval["from"] }
+    assert_equal froms.sort, froms
+  end
+
+  def test_dashboard_disabled_schedule_expects_nothing_but_still_serializes
+    id = seed_device
+    @schedules.upsert(entity: id, **SCHEDULE_BODY.merge(enabled: false))
+    get "/api/dashboard"
+    device = JSON.parse(last_response.body).fetch("devices").first
+    assert_equal false, device.dig("schedule", "enabled")
+    assert_equal [], device.dig("adherence", "expected")
+    assert_equal 0, device.dig("adherence", "deviations")
   end
 
   private

@@ -5,6 +5,7 @@ require "dotenv/load"
 require_relative "lib/janus/app"
 require_relative "lib/janus/poller"
 
-Janus::Poller.start_if_configured(store: Janus::App.store, event_log: Janus::App.event_log)
+Janus::Poller.start_if_configured(store: Janus::App.store, event_log: Janus::App.event_log,
+                                  schedules: Janus::App.schedules)
 
 run Janus::App

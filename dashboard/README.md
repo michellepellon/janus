@@ -57,6 +57,28 @@ and follows the bridge's event stream for changes in between, storing
 append-only state events in the `events` table. The module stays hidden
 until at least one device is recorded.
 
+## Schedules
+
+Each device can carry one schedule: an on time, an off time, and a set of
+weekdays. Times are **local wall clock in the server's zone** — "on at
+19:00" means 19:00 on the wall wherever the server runs, across DST
+changes. Spans may cross midnight (on 21:00, off 02:00); an overnight span
+belongs to the day of its on time.
+
+Enforcement is **edge-triggered**: the poller commands a device only when a
+schedule edge has passed since its previous check, so flipping a light by
+hand mid-window sticks — Janus does not fight you — until the next edge
+reasserts the schedule. Alongside it, adherence is watched continuously:
+when the recorded state disagrees with the schedule for more than five
+minutes, one `deviation` event enters the journal for that episode, so
+"the porch light was off Tuesday evening when it shouldn't have been" is
+queryable history. Each device row shows the expected-on track under its
+recorded strip, deviation tick marks, and a schedule editor.
+
+The API: `GET /api/schedules`, `PUT /api/schedules/:entity` (422 with
+per-field errors on bad input), `DELETE /api/schedules/:entity`; the
+dashboard payload carries each device's `schedule` and `adherence`.
+
 ## Layout
 
 - `lib/janus/store.rb` — DuckDB schema and queries (idempotent inserts,
@@ -65,6 +87,10 @@ until at least one device is recorded.
   windowed on/off interval queries
 - `lib/janus/commander.rb` — issues light on/off commands and reconciles them,
   confirming against observed state events rather than the transport's 2xx
+- `lib/janus/schedules.rb` — per-device schedules (local wall-clock times)
+  and the pure span/edge/interval math
+- `lib/janus/schedule_runner.rb` — edge-triggered enforcement and
+  grace-buffered adherence deviations, run from the poller
 - `lib/janus/collector.rb` — incremental SensorPush collection with paging and
   transient-network retry
 - `lib/janus/weather.rb` — NWS station observations shaped like SensorPush samples

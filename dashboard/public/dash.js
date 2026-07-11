@@ -384,6 +384,113 @@ function commandReducer(state, action) {
   }
 }
 
+// Canonical monday-first week used by schedules; a single-letter chip and a
+// full name per day, index-aligned.
+var DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+var DAY_LETTERS = ["M", "T", "W", "T", "F", "S", "S"];
+var DAY_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+function hmToMinutes(hhmm) {
+  return parseInt(hhmm.slice(0, 2), 10) * 60 + parseInt(hhmm.slice(3, 5), 10);
+}
+
+// Expected-on intervals for a schedule clipped to the x-domain, ascending
+// [{fromMs, toMs}] — the same math as Janus::Schedules.expected_intervals.
+// Times are LOCAL wall clock: here the viewer's zone, server-side the
+// server's zone; enforcement follows the server's wall. A span may cross
+// midnight (on 21:00, off 02:00) and belongs to the day of its on_time, so
+// the walk starts one day before the window to catch a reaching span.
+function expectedIntervals(schedule, xDomain) {
+  if (!schedule || !schedule.enabled) return [];
+  var overnight = hmToMinutes(schedule.on_time) > hmToMinutes(schedule.off_time);
+  var out = [];
+  var d = new Date(xDomain[0]);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - 1);
+  function atLocal(base, hhmm, dayOffset) {
+    return new Date(base.getFullYear(), base.getMonth(), base.getDate() + dayOffset,
+      parseInt(hhmm.slice(0, 2), 10), parseInt(hhmm.slice(3, 5), 10)).getTime();
+  }
+  while (d.getTime() <= xDomain[1]) {
+    if (schedule.days.indexOf(DAY_KEYS[(d.getDay() + 6) % 7]) !== -1) {
+      var from = atLocal(d, schedule.on_time, 0);
+      var to = atLocal(d, schedule.off_time, overnight ? 1 : 0);
+      var a = Math.max(from, xDomain[0]);
+      var b = Math.min(to, xDomain[1]);
+      if (b > a) out.push({ fromMs: a, toMs: b });
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
+// Toggle one day in a selection, keeping canonical week order.
+function toggleDayIn(days, day) {
+  if (days.indexOf(day) !== -1) {
+    return days.filter(function (d) { return d !== day; });
+  }
+  return DAY_KEYS.filter(function (d) { return days.indexOf(d) !== -1 || d === day; });
+}
+
+// "HH:MM" as a 12-hour clock: "19:00" -> "7:00 pm".
+function fmtHM(hhmm) {
+  var h = parseInt(hhmm.slice(0, 2), 10);
+  var h12 = ((h + 11) % 12) + 1;
+  return h12 + ":" + hhmm.slice(3, 5) + " " + (h < 12 ? "am" : "pm");
+}
+
+// The schedule's span for the expected-track tooltip: "7:00 pm to 10:30 pm".
+function scheduleLabel(schedule) {
+  return fmtHM(schedule.on_time) + " to " + fmtHM(schedule.off_time);
+}
+
+// Reducer for one device's schedule editor. State: { on_time, off_time,
+// days, enabled, phase: "idle"|"saving", errors: {field: message} }. Edits
+// clear their own field's error; "saved" reconciles the fields to the
+// server's row; "failed" keeps the edits on screen beside their errors.
+function scheduleEditorReducer(state, action) {
+  switch (action.type) {
+    case "init": {
+      var s = action.schedule;
+      return {
+        on_time: s ? s.on_time : "19:00",
+        off_time: s ? s.off_time : "23:00",
+        days: s ? s.days.slice() : DAY_KEYS.slice(),
+        enabled: s ? s.enabled : true,
+        phase: "idle",
+        errors: {},
+      };
+    }
+    case "set_time":
+      return Object.assign({}, state, clearedError(state, action.field),
+        action.field === "on_time" ? { on_time: action.value } : { off_time: action.value });
+    case "toggle_day":
+      return Object.assign({}, state, clearedError(state, "days"),
+        { days: toggleDayIn(state.days, action.day) });
+    case "set_enabled":
+      return Object.assign({}, state, clearedError(state, "enabled"), { enabled: action.value });
+    case "save":
+      return Object.assign({}, state, { phase: "saving" });
+    case "saved":
+      return Object.assign({}, state, {
+        phase: "idle", errors: {},
+        on_time: action.schedule.on_time, off_time: action.schedule.off_time,
+        days: action.schedule.days.slice(), enabled: action.schedule.enabled,
+      });
+    case "failed":
+      return Object.assign({}, state, { phase: "idle", errors: action.errors });
+    default:
+      return state;
+  }
+}
+
+// A copy of state.errors without one field, for edits that address it.
+function clearedError(state, field) {
+  var errors = {};
+  for (var k in state.errors) if (k !== field) errors[k] = state.errors[k];
+  return { errors: errors };
+}
+
 // Index of the point nearest to xMs; ties snap to the earlier point.
 function nearestIndex(points, xMs) {
   if (points.length === 0) return -1;
@@ -432,6 +539,9 @@ if (typeof document !== "undefined") {
     // an in-flight or just-failed control survives the periodic refresh. Absent
     // means the switch simply mirrors the recorded state.
     var controls = {};
+    // Per-device schedule editor state (open flag + reducer state), kept
+    // across renders for the same reason.
+    var editors = {};
     var main = document.getElementById("sensors");
     var coolingEl = document.getElementById("cooling");
     var devicesModule = document.getElementById("lights-module");
@@ -828,6 +938,22 @@ if (typeof document !== "undefined") {
       for (var s = 0; s < segments.length; s++) {
         if (segments[s].on) band(segments[s].fromMs, segments[s].toMs, colors.lights, "1");
       }
+
+      // Deviation moments (expected and recorded state disagreed past the
+      // grace) as small ticks at the strip's base — a genuine alert, so they
+      // borrow the temperature red.
+      var marks = (device.adherence && device.adherence.marks) || [];
+      for (var m = 0; m < marks.length; m++) {
+        var markMs = Date.parse(marks[m].t);
+        if (markMs < xDomain[0] || markMs > xDomain[1]) continue;
+        svg.appendChild(svgEl("rect", {
+          x: (xs(markMs) - 1).toFixed(2),
+          y: String(height - 7),
+          width: "2",
+          height: "6",
+          fill: colors.temp,
+        }));
+      }
       ["0.5", String(height - 0.5)].forEach(function (y) {
         svg.appendChild(svgEl("line", {
           x1: String(PAD_X), x2: String(VBW - PAD_X), y1: y, y2: y,
@@ -896,6 +1022,241 @@ if (typeof document !== "undefined") {
       return wrap;
     }
 
+    // The expected-state overlay: a thin outline-quality track under the
+    // recorded strip showing when the schedule expects the device on, in the
+    // muted tone so it stays clearly subordinate to the amber actual band.
+    // Sharing the x-domain makes adherence visible as alignment. No schedule
+    // (or nothing expected in the window) renders nothing.
+    function buildExpectedTrack(device, xDomain) {
+      var intervals = expectedIntervals(device.schedule, xDomain);
+      if (intervals.length === 0) return null;
+      var height = 8;
+      var svg = svgEl("svg", {
+        class: "expectedtrack",
+        viewBox: "0 0 " + VBW + " " + height,
+        role: "img",
+        tabindex: "0",
+        "aria-label": device.name + " scheduled on " + scheduleLabel(device.schedule),
+      });
+      var xs = linScale(xDomain, [PAD_X, VBW - PAD_X]);
+      for (var i = 0; i < intervals.length; i++) {
+        svg.appendChild(svgEl("rect", {
+          x: xs(intervals[i].fromMs).toFixed(2),
+          y: "1.5",
+          width: Math.max(0, xs(intervals[i].toMs) - xs(intervals[i].fromMs)).toFixed(2),
+          height: "5",
+          fill: colors.muted,
+          "fill-opacity": "0.12",
+          stroke: colors.muted,
+          "stroke-opacity": "0.8",
+          "stroke-width": "1",
+        }));
+      }
+
+      function showAtMs(xMs) {
+        for (var j = 0; j < intervals.length; j++) {
+          if (xMs >= intervals[j].fromMs && xMs <= intervals[j].toMs) {
+            showTooltip(svg, height, xs(xMs), height / 2,
+              "scheduled on", scheduleLabel(device.schedule));
+            return;
+          }
+        }
+        hideTooltip();
+      }
+      svg.addEventListener("pointermove", function (e) {
+        var rect = svg.getBoundingClientRect();
+        showAtMs(xs.invert(((e.clientX - rect.left) / rect.width) * VBW));
+      });
+      svg.addEventListener("pointerleave", hideTooltip);
+      svg.addEventListener("focus", function () {
+        var last = intervals[intervals.length - 1];
+        showAtMs((last.fromMs + last.toMs) / 2);
+      });
+      svg.addEventListener("blur", hideTooltip);
+      svg.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") hideTooltip();
+      });
+      return svg;
+    }
+
+    // The device's schedule editor state, kept across renders so live edits
+    // survive the periodic refresh; a closed editor re-seeds from the
+    // server's row, so closing the disclosure quietly discards unsaved edits.
+    function editorFor(device) {
+      var ed = editors[device.id];
+      if (!ed) {
+        ed = editors[device.id] = { open: false, state: null };
+      }
+      if (!ed.open || ed.state === null) {
+        ed.state = scheduleEditorReducer(null, { type: "init", schedule: device.schedule });
+      }
+      return ed;
+    }
+
+    function fieldError(message) {
+      return el("span", "fielderror", message);
+    }
+
+    // The per-device schedule editor, a quiet disclosure in the same idiom
+    // as the sensors' "readings" table. Edits mutate the kept editor state
+    // in place (no rebuild, so focus stays put); Save PUTs and reconciles
+    // from the response; validation errors render inline beside their field.
+    function buildScheduleEditor(device) {
+      var ed = editorFor(device);
+      var st = ed.state;
+      var details = el("details", "schededitor");
+      details.appendChild(el("summary", null, "schedule"));
+      if (ed.open) details.open = true;
+      details.addEventListener("toggle", function () {
+        ed.open = details.open;
+        if (!details.open) ed.state = null; // re-seed from the record next open
+      });
+
+      var body = el("div", "schedbody");
+
+      var times = el("div", "schedtimes");
+      [["on", "on_time"], ["off", "off_time"]].forEach(function (pair) {
+        var label = el("label", null, pair[0]);
+        var input = document.createElement("input");
+        input.type = "time";
+        input.value = st[pair[1]];
+        input.setAttribute("aria-label", device.name + " " + pair[0] + " time");
+        if (st.errors[pair[1]]) input.setAttribute("aria-invalid", "true");
+        input.addEventListener("input", function () {
+          ed.state = scheduleEditorReducer(ed.state, {
+            type: "set_time", field: pair[1], value: input.value,
+          });
+        });
+        label.appendChild(input);
+        times.appendChild(label);
+        if (st.errors[pair[1]]) times.appendChild(fieldError(st.errors[pair[1]]));
+      });
+      body.appendChild(times);
+
+      var daysRow = el("div", "scheddays");
+      DAY_KEYS.forEach(function (day, i) {
+        var active = st.days.indexOf(day) !== -1;
+        var chip = el("button", "daychip" + (active ? " active" : ""), DAY_LETTERS[i]);
+        chip.type = "button";
+        chip.setAttribute("role", "checkbox");
+        chip.setAttribute("aria-checked", active ? "true" : "false");
+        chip.setAttribute("aria-label", DAY_FULL[i]);
+        chip.addEventListener("click", function () {
+          ed.state = scheduleEditorReducer(ed.state, { type: "toggle_day", day: day });
+          var nowActive = ed.state.days.indexOf(day) !== -1;
+          chip.classList.toggle("active", nowActive);
+          chip.setAttribute("aria-checked", nowActive ? "true" : "false");
+        });
+        daysRow.appendChild(chip);
+      });
+      if (st.errors.days) daysRow.appendChild(fieldError(st.errors.days));
+      body.appendChild(daysRow);
+
+      var enabledLabel = el("label", "schedenabled");
+      var enabledInput = document.createElement("input");
+      enabledInput.type = "checkbox";
+      enabledInput.checked = st.enabled;
+      enabledInput.addEventListener("change", function () {
+        ed.state = scheduleEditorReducer(ed.state, { type: "set_enabled", value: enabledInput.checked });
+      });
+      enabledLabel.appendChild(enabledInput);
+      enabledLabel.appendChild(el("span", null, "enabled"));
+      if (st.errors.enabled) enabledLabel.appendChild(fieldError(st.errors.enabled));
+      body.appendChild(enabledLabel);
+
+      var actions = el("div", "schedactions");
+      var save = el("button", "schedbtn", st.phase === "saving" ? "saving…" : "save");
+      save.type = "button";
+      if (st.phase === "saving") save.disabled = true;
+      save.addEventListener("click", function () { submitSchedule(device); });
+      actions.appendChild(save);
+      if (device.schedule) {
+        var remove = el("button", "schedbtn", "remove");
+        remove.type = "button";
+        remove.addEventListener("click", function () { removeSchedule(device); });
+        actions.appendChild(remove);
+      }
+      if (st.errors.form) actions.appendChild(fieldError(st.errors.form));
+      body.appendChild(actions);
+
+      details.appendChild(body);
+      return details;
+    }
+
+    // Save the editor's schedule: optimistic-render the expected track from
+    // the edited values, then reconcile from the server's response (its row
+    // on success, the prior schedule plus field errors on failure).
+    function submitSchedule(device) {
+      var ed = editors[device.id];
+      if (!ed || (ed.state && ed.state.phase === "saving")) return;
+      var st = ed.state;
+      ed.state = scheduleEditorReducer(st, { type: "save" });
+      var payload = { on_time: st.on_time, off_time: st.off_time, days: st.days, enabled: st.enabled };
+      var prior = device.schedule;
+      device.schedule = Object.assign({ entity: device.id }, payload);
+      rerenderDevices();
+
+      fetch("/api/schedules/" + encodeURIComponent(device.id), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function (res) {
+        return res.json().then(function (data) { return { ok: res.ok, data: data }; });
+      }).then(function (r) {
+        var dev = deviceById(device.id);
+        var e = editors[device.id];
+        if (r.ok) {
+          if (e && e.state) e.state = scheduleEditorReducer(e.state, { type: "saved", schedule: r.data });
+          if (dev) dev.schedule = r.data;
+        } else {
+          if (e && e.state) {
+            e.state = scheduleEditorReducer(e.state, {
+              type: "failed",
+              errors: r.data.errors || { form: r.data.error || "couldn't save" },
+            });
+          }
+          if (dev) dev.schedule = prior;
+        }
+        rerenderDevices();
+      }).catch(function () {
+        var dev = deviceById(device.id);
+        var e = editors[device.id];
+        if (e && e.state) {
+          e.state = scheduleEditorReducer(e.state, { type: "failed", errors: { form: "couldn't save" } });
+        }
+        if (dev) dev.schedule = prior;
+        rerenderDevices();
+      });
+    }
+
+    // Remove the device's schedule; the track disappears optimistically and
+    // comes back (with an error note) if the server declines.
+    function removeSchedule(device) {
+      var prior = device.schedule;
+      var priorAdherence = device.adherence;
+      device.schedule = null;
+      device.adherence = null;
+      var ed = editors[device.id];
+      if (ed) ed.state = null;
+      rerenderDevices();
+
+      fetch("/api/schedules/" + encodeURIComponent(device.id), { method: "DELETE" })
+        .then(function (res) {
+          if (res.ok || res.status === 404) return; // gone either way
+          throw new Error("http " + res.status);
+        })
+        .catch(function () {
+          var dev = deviceById(device.id);
+          if (dev) { dev.schedule = prior; dev.adherence = priorAdherence; }
+          var e = editors[device.id];
+          if (e) {
+            e.state = scheduleEditorReducer(null, { type: "init", schedule: prior });
+            e.state = scheduleEditorReducer(e.state, { type: "failed", errors: { form: "couldn't remove" } });
+          }
+          rerenderDevices();
+        });
+    }
+
     // The device's switch — the acting register. A styled role="switch" button
     // (big hit target, keyboard-operable), pending while a command is in flight
     // and never lying that an unconfirmed command is done. The strip below
@@ -950,10 +1311,18 @@ if (typeof document !== "undefined") {
           ctl.reason === "unavailable" ? " · control unavailable" : " · didn't confirm"));
       }
       meta.appendChild(stateRow);
+      meta.appendChild(buildScheduleEditor(device));
       row.appendChild(meta);
 
       var strip = el("div", "strip");
       strip.appendChild(buildStateStrip(device, xDomain, hours));
+      var track = buildExpectedTrack(device, xDomain);
+      if (track) strip.appendChild(track);
+      var deviations = device.adherence ? device.adherence.deviations : 0;
+      if (deviations > 0) {
+        strip.appendChild(el("div", "devnote",
+          deviations === 1 ? "1 deviation" : deviations + " deviations"));
+      }
       row.appendChild(strip);
       return row;
     }
@@ -1246,5 +1615,11 @@ if (typeof module !== "undefined") {
     switchState: switchState,
     nextOn: nextOn,
     commandReducer: commandReducer,
+    DAY_KEYS: DAY_KEYS,
+    expectedIntervals: expectedIntervals,
+    toggleDayIn: toggleDayIn,
+    fmtHM: fmtHM,
+    scheduleLabel: scheduleLabel,
+    scheduleEditorReducer: scheduleEditorReducer,
   };
 }
