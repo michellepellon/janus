@@ -192,12 +192,15 @@ header { border-bottom: 1px solid var(--hairline); padding-bottom: 1.1rem; }
 
 /* ---- sensors ---- */
 
-.sensor {
+/* Instrument rows: the whole house reads on one screen, so each sensor is a
+   slim meta column beside a tight stack of word-sized sparklines. */
+.sensor, .sensor-ticks {
   display: grid;
-  grid-template-columns: 200px 1fr;
-  gap: 3rem;
-  padding: 2.6rem 0 2.2rem;
+  grid-template-columns: 180px 1fr;
+  column-gap: 2rem;
 }
+
+.sensor { padding: 0.45rem 0 0.5rem; }
 
 .sensor + .sensor { border-top: 1px solid var(--hairline); }
 
@@ -206,38 +209,37 @@ header { border-bottom: 1px solid var(--hairline); padding-bottom: 1.1rem; }
   letter-spacing: 0.06em;
   font-weight: 400;
   font-size: 1.05rem;
-  margin-bottom: 0.7rem;
+  margin-bottom: 0.15rem;
 }
 
+/* The current reading on one line: the temperature figure, then humidity
+   beside it in the secondary voice at body size. */
 .meta .big {
-  font-size: 44px;
+  font-size: 21px;
   font-weight: 400;
-  line-height: 1.05;
+  line-height: 1.15;
   font-variant-numeric: proportional-nums;
 }
 
-.meta .humnow {
-  color: var(--secondary);
-  margin-top: 0.35rem;
-}
+.meta .humnow { color: var(--secondary); }
 
 .meta .battery {
   color: var(--muted);
-  font-size: 0.85rem;
-  margin-top: 0.55rem;
+  font-size: 0.75rem;
+  margin-top: 0.15rem;
 }
 
 .meta .note {
   color: var(--muted);
-  font-size: 0.85rem;
+  font-size: 0.75rem;
   font-style: italic;
-  margin-top: 0.55rem;
+  margin-top: 0.15rem;
 }
 
 .nodata {
   color: var(--muted);
   font-style: italic;
-  padding-top: 1.4rem;
+  padding-top: 0.2rem;
 }
 
 /* ---- charts ---- */
@@ -252,7 +254,7 @@ header { border-bottom: 1px solid var(--hairline); padding-bottom: 1.1rem; }
 
 .plot .marklabel {
   position: absolute;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   line-height: 1;
   color: var(--secondary);
   white-space: nowrap;
@@ -262,23 +264,37 @@ header { border-bottom: 1px solid var(--hairline); padding-bottom: 1.1rem; }
     1px 0 0 var(--page), -1px 0 0 var(--page);
 }
 
-.chartwrap + .chartwrap, .ticks + .chartwrap { margin-top: 1.1rem; }
+.chartwrap + .chartwrap, .ticks + .chartwrap { margin-top: 4px; }
+
+/* Head line above a stacked chart pair: the combined key at the left, the
+   readings disclosure at the right. */
+.chartshead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.15rem;
+}
 
 .key {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.4rem;
   color: var(--muted);
-  font-size: 0.75rem;
-  margin-bottom: 0.3rem;
+  font-size: 0.65rem;
+  margin-bottom: 0.15rem;
 }
+
+.chartshead .key { margin-bottom: 0; }
 
 .key .swatch {
   display: inline-block;
-  width: 16px;
+  width: 14px;
   height: 2px;
   border-radius: 1px;
 }
+
+.key .swatch:not(:first-child) { margin-left: 0.5rem; }
 
 svg {
   display: block;
@@ -311,11 +327,9 @@ svg:focus-visible {
 /* The disclosure reads as the quiet third element of the chart column:
    temperature, humidity, readings. The schedule editor borrows the same
    idiom, so the two disclosures share these rules. */
-.datatable { margin-top: 1.6rem; }
-
 .datatable summary, .schededitor summary {
   color: var(--muted);
-  font-size: 0.85rem;
+  font-size: 0.75rem;
   cursor: pointer;
   width: max-content;
   list-style: none;
@@ -682,10 +696,10 @@ svg:focus-visible {
 
 @media (max-width: 719px) {
   .wrap { padding: 1.8rem 1.2rem 3.5rem; }
+  .sensor, .sensor-ticks { grid-template-columns: 1fr; }
   .sensor {
-    grid-template-columns: 1fr;
-    gap: 1.4rem;
-    padding: 2rem 0 1.8rem;
+    row-gap: 0.5rem;
+    padding: 0.7rem 0 0.75rem;
   }
   .cooling { grid-template-columns: 1fr; }
   .cooling .charts { grid-column: 1; }

@@ -725,12 +725,16 @@ if (typeof document !== "undefined") {
       var height = opts.height;
       var wrap = el("div", "chartwrap");
 
-      var keyRow = el("div", "key");
-      var swatch = el("span", "swatch");
-      swatch.style.background = opts.color;
-      keyRow.appendChild(swatch);
-      keyRow.appendChild(el("span", null, opts.unitLabel));
-      wrap.appendChild(keyRow);
+      // A chart can carry its own key row, or lean on a combined key its
+      // caller draws once for a stacked pair (noKey).
+      if (!opts.noKey) {
+        var keyRow = el("div", "key");
+        var swatch = el("span", "swatch");
+        swatch.style.background = opts.color;
+        keyRow.appendChild(swatch);
+        keyRow.appendChild(el("span", null, opts.unitLabel));
+        wrap.appendChild(keyRow);
+      }
 
       // The plot box wraps just the SVG so mark labels can be positioned as
       // percentages of the chart area (the key row above would skew them).
@@ -941,14 +945,21 @@ if (typeof document !== "undefined") {
       return details;
     }
 
+    // One instrument row per sensor: a slim meta column (name, the current
+    // reading on one line, whispers below it) beside a tight stack of
+    // temperature and humidity sparklines. Ticks are not drawn here — the
+    // module shares one tick row under its last sensor, since every chart
+    // reads the same x-domain.
     function buildSensor(sensor, xDomain, hours, openTables) {
       var section = el("section", "sensor");
 
       var meta = el("div", "meta");
       meta.appendChild(el("h3", "name", sensor.name));
       var latest = sensor.latest;
-      meta.appendChild(el("div", "big", latest ? fmtTemp(latest.temperature) : "—"));
-      if (latest) meta.appendChild(el("div", "humnow", fmtHum(latest.humidity)));
+      var reading = el("div", "reading");
+      reading.appendChild(el("span", "big", latest ? fmtTemp(latest.temperature) : "—"));
+      if (latest) reading.appendChild(el("span", "humnow", " · " + fmtHum(latest.humidity)));
+      meta.appendChild(reading);
       var staleMs = latest ?
         staleSinceMs(latest.observed, xDomain[1], staleThresholdMinutes(sensor.series)) : null;
       if (staleMs !== null) {
@@ -970,12 +981,30 @@ if (typeof document !== "undefined") {
         return section;
       }
 
+      // One head line serves both charts: a combined key at the left, the
+      // readings disclosure at the right — chart furniture off the plots.
+      var head = el("div", "chartshead");
+      var keyRow = el("div", "key");
+      [[colors.temp, "°F"], [colors.hum, "% rh"]].forEach(function (pair) {
+        var swatch = el("span", "swatch");
+        swatch.style.background = pair[0];
+        keyRow.appendChild(swatch);
+        keyRow.appendChild(el("span", null, pair[1]));
+      });
+      head.appendChild(keyRow);
+      var table = buildDataTable(sensor.series, hours);
+      table.dataset.sensorId = sensor.id;
+      stampFocus(table.querySelector("summary"), "sensor", "table", sensor.id);
+      if (openTables && openTables[sensor.id]) table.open = true;
+      head.appendChild(table);
+      charts.appendChild(head);
+
       // The sensor's two charts share a crosshair link: hovering one mirrors
       // the position (without a tooltip) on the other.
       var link = { peers: [] };
       charts.appendChild(buildChart({
         points: sensor.series, key: "temp",
-        height: 96, padTop: 20, padBottom: 18,
+        height: 54, padTop: 9, padBottom: 8, noKey: true,
         color: colors.temp, unitLabel: "°F",
         xDomain: xDomain, hours: hours,
         ariaLabel: sensor.name + " temperature, " + hoursLabel(hours),
@@ -984,10 +1013,9 @@ if (typeof document !== "undefined") {
         link: link, hoverScope: "climate",
         focus: { kind: "sensor", part: "temp", id: sensor.id },
       }));
-      charts.appendChild(buildTicksRow(xDomain, hours));
       charts.appendChild(buildChart({
         points: sensor.series, key: "hum",
-        height: 56, padTop: 20, padBottom: 13,
+        height: 32, padTop: 7, padBottom: 7, noKey: true,
         color: colors.hum, unitLabel: "% rh",
         xDomain: xDomain, hours: hours,
         ariaLabel: sensor.name + " humidity, " + hoursLabel(hours),
@@ -996,11 +1024,6 @@ if (typeof document !== "undefined") {
         link: link, hoverScope: "climate",
         focus: { kind: "sensor", part: "hum", id: sensor.id },
       }));
-      var table = buildDataTable(sensor.series, hours);
-      table.dataset.sensorId = sensor.id;
-      stampFocus(table.querySelector("summary"), "sensor", "table", sensor.id);
-      if (openTables && openTables[sensor.id]) table.open = true;
-      charts.appendChild(table);
       section.appendChild(charts);
       return section;
     }
@@ -1681,6 +1704,15 @@ if (typeof document !== "undefined") {
       for (var i = 0; i < data.sensors.length; i++) {
         main.appendChild(buildSensor(data.sensors[i], xDomain, data.hours, openTables));
       }
+      // One sparse tick row for the whole climate module: every chart above
+      // (ΔT strip included) shares this x-domain, so per-chart ticks would be
+      // redundant ink at this density.
+      var sensorTicks = el("div", "sensor-ticks");
+      sensorTicks.appendChild(el("div"));
+      var tickCol = el("div", "charts");
+      tickCol.appendChild(buildTicksRow(xDomain, data.hours));
+      sensorTicks.appendChild(tickCol);
+      main.appendChild(sensorTicks);
       main.classList.remove("stale");
       restoreFocus(focused);
     }
