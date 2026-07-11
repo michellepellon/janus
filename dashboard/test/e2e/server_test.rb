@@ -26,6 +26,10 @@ class ServerE2ETest < Minitest::Test
       {
         "JANUS_DB_PATH" => db_path,
         "JANUS_COLLECT" => "off",
+        # Hermetic regardless of .env: a paired bridge on the developer's
+        # machine must not make the e2e server "configured" (or reachable).
+        "HUE_BRIDGE_IP" => "",
+        "HUE_APP_KEY" => "",
         "BUNDLE_GEMFILE" => File.expand_path("../../Gemfile", __dir__)
       },
       "bundle", "exec", "rackup", "-o", "127.0.0.1", "-p", @port.to_s, "config.ru",

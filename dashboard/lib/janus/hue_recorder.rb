@@ -47,6 +47,7 @@ module Janus
           begin
             io = @hue.open_event_stream
             attempt = 0
+            logger_io.puts "[#{Time.now.getutc.iso8601}] hue stream: connected"
             @hue.each_event(io: io) do |event|
               record_state(event[:entity], event[:on], event[:observed])
             end
