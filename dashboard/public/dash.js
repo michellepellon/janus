@@ -638,6 +638,7 @@ if (typeof document !== "undefined") {
     var editors = {};
     var main = document.getElementById("sensors");
     var coolingEl = document.getElementById("cooling");
+    var climateLineEl = document.getElementById("climate-line");
     var devicesModule = document.getElementById("lights-module");
     var devicesEl = document.getElementById("devices");
     var generatedEl = document.getElementById("generated");
@@ -1028,29 +1029,21 @@ if (typeof document !== "undefined") {
       return section;
     }
 
-    // The cooling strip: a one-line verdict on opening up the house plus a
-    // diverging outside-minus-house chart. The line stays neutral (secondary
-    // text color); the wash between line and zero carries the sign — warm
+    // The cooling strip: a diverging outside-minus-house chart. Its one-line
+    // verdict lives on the module-head line (renderCoolingSentence), and its
+    // ticks in the module's shared tick row — every climate chart reads the
+    // same x-domain. The wash between line and zero carries the sign — warm
     // red above the baseline, cool blue below.
     function buildCoolingStrip(cooling, xDomain, hours) {
       var strip = el("section", "cooling");
 
-      var parts = coolingSentence(cooling.now);
-      if (parts) {
-        var sentence = el("p", "sentence");
-        for (var i = 0; i < parts.length; i++) {
-          sentence.appendChild(el("span", parts[i].value ? "val" : null, parts[i].text));
-        }
-        strip.appendChild(sentence);
-      }
-
       var points = cooling.series;
       var charts = el("div", "charts");
-      // The key row names both bases on show: the sentence above reads the
-      // latest readings; the chart draws bucket means.
+      // The key row names both bases on show: the head-line sentence reads
+      // the latest readings; the chart draws bucket means.
       charts.appendChild(buildChart({
         points: points, key: "delta",
-        height: 72, padTop: 14, padBottom: 12,
+        height: 54, padTop: 9, padBottom: 8,
         color: colors.secondary, unitLabel: "Δ °F, outside − house · bucket means",
         xDomain: xDomain, hours: hours,
         ariaLabel: "Outside minus house temperature difference, " + hoursLabel(hours),
@@ -1084,9 +1077,19 @@ if (typeof document !== "undefined") {
           }));
         },
       }));
-      charts.appendChild(buildTicksRow(xDomain, hours));
       strip.appendChild(charts);
       return strip;
+    }
+
+    // The cooling verdict on the climate module-head line: muted text with
+    // the values in ink, or nothing when there is no current differential.
+    function renderCoolingSentence(cooling) {
+      climateLineEl.textContent = "";
+      var parts = cooling ? coolingSentence(cooling.now) : null;
+      if (!parts) return;
+      for (var i = 0; i < parts.length; i++) {
+        climateLineEl.appendChild(el("span", parts[i].value ? "val" : null, parts[i].text));
+      }
     }
 
     // The on/off journal strip for one device: on-intervals filled in the
@@ -1096,7 +1099,7 @@ if (typeof document !== "undefined") {
     // tooltip, and keyboard interaction mirror the sensor charts, stepping
     // across state-change boundaries.
     function buildStateStrip(device, xDomain, hours) {
-      var height = 28;
+      var height = 20;
       var wrap = el("div", "stripwrap");
       var svg = svgEl("svg", {
         viewBox: "0 0 " + VBW + " " + height,
@@ -1222,7 +1225,7 @@ if (typeof document !== "undefined") {
     function buildExpectedTrack(device, xDomain) {
       var intervals = expectedIntervals(device.schedule, xDomain);
       if (intervals.length === 0) return null;
-      var height = 8;
+      var height = 5;
       var svg = svgEl("svg", {
         class: "expectedtrack",
         viewBox: "0 0 " + VBW + " " + height,
@@ -1235,9 +1238,9 @@ if (typeof document !== "undefined") {
       for (var i = 0; i < intervals.length; i++) {
         svg.appendChild(svgEl("rect", {
           x: xs(intervals[i].fromMs).toFixed(2),
-          y: "1.5",
+          y: "1",
           width: Math.max(0, xs(intervals[i].toMs) - xs(intervals[i].fromMs)).toFixed(2),
-          height: "5",
+          height: "3",
           fill: colors.muted,
           "fill-opacity": "0.12",
           stroke: colors.muted,
@@ -1488,14 +1491,18 @@ if (typeof document !== "undefined") {
       return btn;
     }
 
+    // A device reads as two tight lines (name; room and state) with the
+    // switch beside them, the schedule disclosure below, and the journal
+    // strip filling the chart column.
     function buildDeviceRow(device, xDomain, hours) {
       var row = el("div", "device");
 
       var meta = el("div", "meta");
-      meta.appendChild(el("h3", "name", device.name));
-      if (device.room) meta.appendChild(el("div", "room", device.room));
-      meta.appendChild(buildSwitch(device));
+      var head = el("div", "devhead");
+      var lines = el("div", "devlines");
+      lines.appendChild(el("h3", "name", device.name));
       var stateRow = el("div", "staterow");
+      if (device.room) stateRow.appendChild(el("span", "room", device.room + " · "));
       if (device.on === null || device.on === undefined) {
         stateRow.appendChild(el("span", "state unknown", "no record yet"));
       } else {
@@ -1517,7 +1524,10 @@ if (typeof document !== "undefined") {
         stateRow.appendChild(el("span", "cmdfail",
           ctl.reason === "unavailable" ? " · control unavailable" : " · didn't confirm"));
       }
-      meta.appendChild(stateRow);
+      lines.appendChild(stateRow);
+      head.appendChild(lines);
+      head.appendChild(buildSwitch(device));
+      meta.appendChild(head);
       meta.appendChild(buildScheduleEditor(device));
       row.appendChild(meta);
 
@@ -1662,6 +1672,7 @@ if (typeof document !== "undefined") {
 
     function showMessage(text) {
       hideTooltip();
+      climateLineEl.textContent = "";
       coolingEl.textContent = "";
       coolingEl.classList.remove("stale");
       main.textContent = "";
@@ -1698,7 +1709,10 @@ if (typeof document !== "undefined") {
       renderDevices(data.devices, xDomain, data.hours);
       coolingEl.textContent = "";
       if (data.cooling && data.cooling.series && data.cooling.series.length > 0) {
+        renderCoolingSentence(data.cooling);
         coolingEl.appendChild(buildCoolingStrip(data.cooling, xDomain, data.hours));
+      } else {
+        renderCoolingSentence(null);
       }
       coolingEl.classList.remove("stale");
       for (var i = 0; i < data.sensors.length; i++) {
