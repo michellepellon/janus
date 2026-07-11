@@ -119,6 +119,22 @@ class CommanderTest < Minitest::Test
     end
   end
 
+# The bridge stamps event creationtime at whole-second resolution, so a
+# sub-second response can carry an observed time fractionally BEFORE the
+# command's requested_at. The confirm window must tolerate that skew.
+def test_reconcile_confirms_a_state_event_in_the_same_second_as_the_request
+  with_commander do |commander, log, _hue|
+    requested = Time.at(NOW.to_i, 480_000).getutc # NOW with 480ms fraction
+    id = log.request(entity: LIGHT_ENTITY, action: { on: true },
+                     source: "dashboard", requested_at: requested)
+    record_state(log, LIGHT_ENTITY, true, Time.at(NOW.to_i).getutc) # whole second
+
+    result = commander.reconcile_pending(now: NOW + 5, timeout_seconds: 30)
+    assert_equal({ confirmed: 1, failed: 0 }, result)
+    assert_equal "confirmed", log.command(id)[:status]
+  end
+end
+
   def test_reconcile_fails_a_pending_command_past_the_timeout_without_confirmation
     with_commander do |commander, log, _hue|
       id = log.request(entity: LIGHT_ENTITY, action: { on: true },

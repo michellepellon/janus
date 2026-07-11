@@ -28,8 +28,16 @@ module Janus
 
     # Default seconds a command may stay pending before an unconfirmed one is
     # resolved failed. A command confirms the instant a matching state event
-    # arrives; this only bounds the wait when none ever does.
-    DEFAULT_TIMEOUT_SECONDS = 30
+    # arrives; this only bounds the wait when none ever does (it must cover a
+    # stream reconnect through the retry ladder, hence the headroom).
+    DEFAULT_TIMEOUT_SECONDS = 60
+
+    # The bridge stamps event creationtime at whole-second resolution, so an
+    # event caused by a command can carry an observed time fractionally
+    # earlier than the command's requested_at. The confirm window opens this
+    # far before the request; an already-matching state a moment earlier is
+    # idempotent truth, never a false confirmation.
+    CONFIRM_SKEW_SECONDS = 1
 
     def initialize(hue:, event_log:, source: "dashboard")
       @hue = hue
@@ -74,7 +82,10 @@ module Janus
       confirmed = 0
       failed = 0
       @event_log.pending_commands.each do |cmd|
-        observed = @event_log.confirming_state(entity: cmd[:entity], on: cmd[:on], since: cmd[:requested_at])
+        observed = @event_log.confirming_state(
+          entity: cmd[:entity], on: cmd[:on],
+          since: cmd[:requested_at] - CONFIRM_SKEW_SECONDS
+        )
         if observed
           @event_log.resolve(cmd[:id], status: "confirmed", detail: "observed at #{observed.iso8601}")
           confirmed += 1

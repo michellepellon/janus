@@ -296,8 +296,13 @@ module Janus
         # cycle repairs any state it carried.
       end
 
+      # Seconds allowed for the TCP connect to the bridge. Without a bound, a
+      # bridge that is booting or briefly unroutable leaves the stream thread
+      # hung silently in connect for the OS default (minutes).
+      CONNECT_TIMEOUT_SECONDS = 5
+
       def connect_tls
-        tcp = TCPSocket.new(@bridge_ip, 443)
+        tcp = Socket.tcp(@bridge_ip, 443, connect_timeout: CONNECT_TIMEOUT_SECONDS)
         context = OpenSSL::SSL::SSLContext.new
         # LAN-local bridge with a Signify-signed certificate; see Http above.
         context.verify_mode = OpenSSL::SSL::VERIFY_NONE
