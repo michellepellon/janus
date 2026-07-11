@@ -37,9 +37,14 @@ customizes the User-Agent the NWS API requires.
 
 ## Lights & outlets
 
-Philips Hue lights and smart plugs appear in a read-only "lights & outlets"
-journal: current state plus an on/off timeline per device. Janus records
-state — control comes later. To pair:
+Philips Hue lights and smart plugs appear in a "lights & outlets" module:
+an on/off switch per device over the recorded state — current state plus an
+on/off timeline. Tapping a switch issues a command that stays *pending* until
+the bridge's own event stream reports the change: a 2xx from the bridge means
+"accepted", the observed state event means "done", so the switch settles only
+on confirmation and snaps back if none arrives. The strip stays the record;
+the switch is the intent. Control needs a paired bridge; without one the
+module is read-only and the toggle endpoints answer honestly. To pair:
 
 1. Power on the Hue bridge and make sure it's on your network.
 2. Run `bin/hue-pair` (it finds the bridge, or pass `--ip`).
@@ -58,6 +63,8 @@ until at least one device is recorded.
   time-bucketed dashboard windows, devices registry)
 - `lib/janus/event_log.rb` — append-only events journal, command ledger, and
   windowed on/off interval queries
+- `lib/janus/commander.rb` — issues light on/off commands and reconciles them,
+  confirming against observed state events rather than the transport's 2xx
 - `lib/janus/collector.rb` — incremental SensorPush collection with paging and
   transient-network retry
 - `lib/janus/weather.rb` — NWS station observations shaped like SensorPush samples

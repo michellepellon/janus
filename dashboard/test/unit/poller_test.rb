@@ -196,6 +196,35 @@ class PollerTest < Minitest::Test
     end
   end
 
+  def test_start_reconciles_pending_hue_commands_each_cycle
+    with_store do |store|
+      queue = Queue.new
+      event_log = Janus::EventLog.new(store: store)
+      now = Time.now.getutc
+      cid = event_log.request(entity: "hue.light.x", action: { on: true },
+                              source: "dashboard", requested_at: now - 5)
+      event_log.record(observed: now - 2, source: "hue", entity: "hue.light.x",
+                       kind: "state", payload: { on: true })
+
+      hue = SignalingHue.new(queue)
+      thread = Janus::Poller.start(
+        store: store, event_log: event_log, interval: 0.01,
+        hue_factory: proc { hue }, sensorpush: false, hue: true, hue_stream: false,
+        logger_io: StringIO.new
+      )
+      begin
+        queue.pop(timeout: 2) # a hue collection cycle ran
+        deadline = Time.now + 2
+        sleep 0.02 until event_log.command(cid)[:status] == "confirmed" || Time.now > deadline
+        assert_equal "confirmed", event_log.command(cid)[:status],
+                     "the observed state event confirms the pending command via reconcile"
+      ensure
+        thread.kill
+        thread.join
+      end
+    end
+  end
+
   def test_start_launches_the_hue_stream_thread_when_enabled
     with_store do |store|
       queue = Queue.new

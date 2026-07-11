@@ -56,6 +56,79 @@ module Janus
       nil
     end
 
+    # Records progress on an open command without resolving it — the transport
+    # accepting the request is not the same as the bridge confirming the change,
+    # so the command stays pending until a matching state event arrives.
+    def stamp(id, detail:)
+      @store.with_connection do |conn|
+        conn.query("UPDATE commands SET detail = ? WHERE id = ?", detail, id)
+      end
+      nil
+    end
+
+    # One command by id: { id:, entity:, on:, source:, requested_at:, status:,
+    # resolved_at:, detail: } with +on+ parsed from the action, or nil when no
+    # such command exists.
+    def command(id)
+      @store.with_connection do |conn|
+        row = conn.query(<<~SQL, id).first
+          SELECT id, entity, CAST(action->>'$.on' AS BOOLEAN),
+                 source, requested_at, status, resolved_at, detail
+          FROM commands WHERE id = ?
+        SQL
+        row && command_row(row)
+      end
+    end
+
+    # Open commands (status 'pending'), oldest first, for the reconcile pass:
+    # { id:, entity:, on:, requested_at: }.
+    def pending_commands
+      @store.with_connection do |conn|
+        conn.query(<<~SQL).to_a.map do |(id, entity, on, requested_at)|
+          SELECT id, entity, CAST(action->>'$.on' AS BOOLEAN), requested_at
+          FROM commands WHERE status = 'pending'
+          ORDER BY requested_at, id
+        SQL
+          { id: id, entity: entity, on: on, requested_at: as_utc(requested_at) }
+        end
+      end
+    end
+
+    # The newest command for one entity: { id:, on:, status:, requested_at:,
+    # resolved_at: }, or nil when the entity has no commands.
+    def latest_command(entity:)
+      @store.with_connection do |conn|
+        row = conn.query(<<~SQL, entity).first
+          SELECT id, CAST(action->>'$.on' AS BOOLEAN), status, requested_at, resolved_at
+          FROM commands WHERE entity = ?
+          ORDER BY requested_at DESC, id DESC
+          LIMIT 1
+        SQL
+        return nil if row.nil?
+
+        { id: row[0], on: row[1], status: row[2],
+          requested_at: as_utc(row[3]), resolved_at: as_utc(row[4]) }
+      end
+    end
+
+    # The observed time of the earliest state event for +entity+ that carries
+    # the requested on-state at or after +since+, or nil when none has arrived.
+    # This is the confirmation signal: the bridge's own state report, not the
+    # transport's acceptance, is what closes a command.
+    def confirming_state(entity:, on:, since:)
+      @store.with_connection do |conn|
+        row = conn.query(<<~SQL, entity, on, normalize_time(since)).first
+          SELECT observed FROM events
+          WHERE kind = 'state' AND entity = ?
+            AND CAST(payload->>'$.on' AS BOOLEAN) = ?
+            AND observed >= ?
+          ORDER BY observed, id
+          LIMIT 1
+        SQL
+        row && as_utc(row[0])
+      end
+    end
+
     # The most recent recorded on/off state for one entity: {on:, observed:},
     # or nil when no state event carries a payload.on boolean.
     def latest_state(entity:)
@@ -137,6 +210,16 @@ module Janus
     end
 
     private
+
+    # Shapes a full commands row (id, entity, on, source, requested_at, status,
+    # resolved_at, detail) into the command hash, reinterpreting timestamps as UTC.
+    def command_row(row)
+      {
+        id: row[0], entity: row[1], on: row[2], source: row[3],
+        requested_at: as_utc(row[4]), status: row[5],
+        resolved_at: as_utc(row[6]), detail: row[7]
+      }
+    end
 
     # Folds per-entity (time, on) change points into closed intervals.
     # Consecutive events with the same state extend the open interval, so the

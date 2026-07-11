@@ -8,6 +8,7 @@ require_relative "weather"
 require_relative "weather_collector"
 require_relative "hue"
 require_relative "hue_recorder"
+require_relative "commander"
 
 module Janus
   class Poller
@@ -48,6 +49,7 @@ module Janus
         weather_client = nil
         hue_recorder = nil
         hue_stream_thread = nil
+        commander = nil
         loop do
           if sensorpush
             begin
@@ -80,6 +82,15 @@ module Janus
               end
               result = hue_recorder.run_once
               record_collection(event_log, "hue", result)
+              # Resolve any pending commands against the observed record, so a
+              # stale pending fails on the timeout even without a live SSE
+              # confirmation. reconcile needs no bridge, only the event log.
+              commander ||= Commander.new(hue: nil, event_log: event_log)
+              reconciled = commander.reconcile_pending(now: Time.now.getutc)
+              if reconciled[:confirmed].positive? || reconciled[:failed].positive?
+                logger_io.puts "[#{Time.now.getutc.iso8601}] poller: hue commands " \
+                               "confirmed=#{reconciled[:confirmed]} failed=#{reconciled[:failed]}"
+              end
             rescue StandardError => e
               hue_recorder = nil
               logger_io.puts "[#{Time.now.getutc.iso8601}] poller: hue: #{e.class}: #{e.message}"

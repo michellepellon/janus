@@ -342,6 +342,48 @@ function nextTheme(current) {
   return THEME_MODES[(i + 1) % THEME_MODES.length];
 }
 
+// The acting register for a device's switch: "pending" while a command is in
+// flight, else "on"/"off" from the recorded state. Unknown recorded state
+// (never observed) settles a resting binary switch to "off".
+function switchState(device) {
+  if (device.pending) return "pending";
+  return device.on === true ? "on" : "off";
+}
+
+// The on-state a tap should request given the currently displayed switch state:
+// flip a committed state; a pending or unknown switch acts toward on.
+function nextOn(state) {
+  return state !== "on";
+}
+
+// Reducer for one device's command lifecycle. State:
+// { phase: "pending"|"confirmed"|"failed", on, prior, commandId, elapsedMs }.
+// The switch shows pending until an observed confirmation (status) or the poll
+// cap (tick) resolves it — a 2xx on submit only makes it pending, never done.
+function commandReducer(state, action) {
+  switch (action.type) {
+    case "submit":
+      return { phase: "pending", on: action.on, prior: action.prior, commandId: null, elapsedMs: 0 };
+    case "accepted":
+      return Object.assign({}, state, { commandId: action.commandId });
+    case "status":
+      if (state.phase !== "pending") return state;
+      if (action.status === "confirmed") return Object.assign({}, state, { phase: "confirmed" });
+      if (action.status === "failed") return Object.assign({}, state, { phase: "failed" });
+      return state;
+    case "tick":
+      if (state.phase !== "pending") return state;
+      var elapsed = state.elapsedMs + action.ms;
+      if (elapsed >= action.cap) return Object.assign({}, state, { phase: "failed", elapsedMs: elapsed });
+      return Object.assign({}, state, { elapsedMs: elapsed });
+    case "error":
+      if (state.phase !== "pending") return state;
+      return Object.assign({}, state, { phase: "failed" });
+    default:
+      return state;
+  }
+}
+
 // Index of the point nearest to xMs; ties snap to the earlier point.
 function nearestIndex(points, xMs) {
   if (points.length === 0) return -1;
@@ -380,8 +422,16 @@ if (typeof document !== "undefined") {
       { hours: 720, label: "30 d" },
     ];
     var REFRESH_MS = 5 * 60 * 1000;
+    // Command-status polling: a short interval capped near the server's own
+    // confirmation timeout, so a command that never confirms fails on its own.
+    var POLL_MS = 1500;
+    var POLL_CAP_MS = 35 * 1000;
 
     var state = { hours: 24, data: null };
+    // Per-device command lifecycle, keyed by device id, kept across renders so
+    // an in-flight or just-failed control survives the periodic refresh. Absent
+    // means the switch simply mirrors the recorded state.
+    var controls = {};
     var main = document.getElementById("sensors");
     var coolingEl = document.getElementById("cooling");
     var devicesModule = document.getElementById("lights-module");
@@ -846,12 +896,38 @@ if (typeof document !== "undefined") {
       return wrap;
     }
 
+    // The device's switch — the acting register. A styled role="switch" button
+    // (big hit target, keyboard-operable), pending while a command is in flight
+    // and never lying that an unconfirmed command is done. The strip below
+    // stays the record; this button is the intent.
+    function buildSwitch(device) {
+      var ctl = controls[device.id];
+      var display = (ctl && ctl.phase === "pending") ? "pending" : switchState(device);
+      // During pending the committed on-state is whatever we acted from (a live
+      // tap knows its prior; a pending command from a reload falls back to the
+      // recorded state), so the control never pretends the change has landed.
+      var committedOn = display === "pending"
+        ? (ctl ? ctl.prior === "on" : device.on === true)
+        : (display === "on");
+
+      var btn = el("button", "switch " + display);
+      btn.type = "button";
+      btn.setAttribute("role", "switch");
+      btn.setAttribute("aria-checked", committedOn ? "true" : "false");
+      btn.setAttribute("aria-label", device.name);
+      if (display === "pending") btn.setAttribute("aria-busy", "true");
+      btn.appendChild(el("span", "knob"));
+      btn.addEventListener("click", function () { submitToggle(device); });
+      return btn;
+    }
+
     function buildDeviceRow(device, xDomain, hours) {
       var row = el("div", "device");
 
       var meta = el("div", "meta");
       meta.appendChild(el("h3", "name", device.name));
       if (device.room) meta.appendChild(el("div", "room", device.room));
+      meta.appendChild(buildSwitch(device));
       var stateRow = el("div", "staterow");
       if (device.on === null || device.on === undefined) {
         stateRow.appendChild(el("span", "state unknown", "no record yet"));
@@ -866,6 +942,13 @@ if (typeof document !== "undefined") {
             " for " + fmtDuration(xDomain[1] - current.sinceMs)));
         }
       }
+      // A quiet marker when the last command did not confirm; it clears on the
+      // next successful action (the next tap replaces this device's control).
+      var ctl = controls[device.id];
+      if (ctl && ctl.phase === "failed") {
+        stateRow.appendChild(el("span", "cmdfail",
+          ctl.reason === "unavailable" ? " · control unavailable" : " · didn't confirm"));
+      }
       meta.appendChild(stateRow);
       row.appendChild(meta);
 
@@ -873,6 +956,95 @@ if (typeof document !== "undefined") {
       strip.appendChild(buildStateStrip(device, xDomain, hours));
       row.appendChild(strip);
       return row;
+    }
+
+    // Rebuild just the lights module from the current data, so a control state
+    // change repaints its switch without disturbing the sensor charts.
+    function rerenderDevices() {
+      if (!state.data) return;
+      var endMs = Date.parse(state.data.generated_at);
+      var xDomain = [endMs - state.data.hours * 3600 * 1000, endMs];
+      renderDevices(state.data.devices, xDomain, state.data.hours);
+    }
+
+    // The device object currently in state.data, or null if it has gone.
+    function deviceById(id) {
+      var devices = (state.data && state.data.devices) || [];
+      for (var i = 0; i < devices.length; i++) if (devices[i].id === id) return devices[i];
+      return null;
+    }
+
+    // Tap handler: move the switch to pending, POST the toggle, then poll the
+    // command until it leaves pending. Optimistic but honest — pending is a
+    // distinct state, and a failure snaps back to where we started.
+    function submitToggle(device) {
+      var id = device.id;
+      var ctl = controls[id];
+      if (ctl && ctl.phase === "pending") return; // one command at a time
+
+      var current = switchState(device);
+      controls[id] = commandReducer(null, { type: "submit", on: nextOn(current), prior: current });
+      rerenderDevices();
+
+      var target = controls[id].on;
+      fetch("/api/devices/" + encodeURIComponent(id) + "/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: target })
+      }).then(function (res) {
+        return res.json().then(function (body) { return { ok: res.ok, status: res.status, body: body }; });
+      }).then(function (r) {
+        var c = controls[id];
+        if (!c || c.phase !== "pending") return;
+        if (r.ok) {
+          controls[id] = commandReducer(c, { type: "accepted", commandId: r.body.command_id });
+          pollCommand(id);
+        } else {
+          controls[id] = { phase: "failed", prior: c.prior, reason: r.status === 409 ? "unavailable" : "error" };
+          rerenderDevices();
+        }
+      }).catch(function () {
+        var c = controls[id];
+        if (c && c.phase === "pending") {
+          controls[id] = commandReducer(c, { type: "error" });
+          rerenderDevices();
+        }
+      });
+    }
+
+    // Polls GET /api/commands/:id on an interval, advancing the poll clock each
+    // step so an unconfirmed command fails at the cap. Confirmation reloads the
+    // dashboard so the strip (the record) shows the newly observed state.
+    function pollCommand(id) {
+      function step() {
+        var c = controls[id];
+        if (!c || c.phase !== "pending") return;
+        c = controls[id] = commandReducer(c, { type: "tick", ms: POLL_MS, cap: POLL_CAP_MS });
+        if (c.phase !== "pending") { rerenderDevices(); return; } // timed out
+        if (!c.commandId) { window.setTimeout(step, POLL_MS); return; }
+
+        fetch("/api/commands/" + c.commandId)
+          .then(function (res) { if (!res.ok) throw new Error("http " + res.status); return res.json(); })
+          .then(function (data) {
+            var cur = controls[id];
+            if (!cur || cur.phase !== "pending") return;
+            cur = controls[id] = commandReducer(cur, { type: "status", status: data.status });
+            if (cur.phase === "confirmed") {
+              delete controls[id];
+              load(state.hours); // the confirming state event extends the strip
+            } else if (cur.phase === "failed") {
+              rerenderDevices();
+            } else {
+              window.setTimeout(step, POLL_MS);
+            }
+          })
+          .catch(function () {
+            // A transient poll error keeps the command pending; the cap still
+            // bounds the wait on the next tick.
+            if (controls[id] && controls[id].phase === "pending") window.setTimeout(step, POLL_MS);
+          });
+      }
+      window.setTimeout(step, POLL_MS);
     }
 
     // The lights & outlets module renders only when devices exist; a house
@@ -1071,5 +1243,8 @@ if (typeof module !== "undefined") {
     unknownRanges: unknownRanges,
     stateAtTime: stateAtTime,
     fmtDuration: fmtDuration,
+    switchState: switchState,
+    nextOn: nextOn,
+    commandReducer: commandReducer,
   };
 }

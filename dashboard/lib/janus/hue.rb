@@ -193,8 +193,9 @@ module Janus
         end
       end
 
-      # Turns one light or plug on or off. Exists for the control path; the
-      # dashboard remains read-only until commands are wired end to end.
+      # Turns one light or plug on or off. A 2xx means the bridge accepted the
+      # request, not that the change has taken effect — the commander confirms
+      # against the observed state event, not this return.
       def set_light(id, on:)
         status, body = @fetcher.call(
           :put, uri("#{RESOURCE_PATH}/light/#{id}"), headers, JSON.generate(on: { on: on })

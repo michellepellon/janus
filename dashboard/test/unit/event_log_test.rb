@@ -103,6 +103,106 @@ class EventLogTest < Minitest::Test
     end
   end
 
+  def test_command_returns_full_row_with_parsed_on_or_nil
+    with_log do |log|
+      assert_nil log.command(999), "unknown id reads as nil"
+
+      id = log.request(entity: "hue.light.abc", action: { on: true },
+                       source: "dashboard", requested_at: NOW)
+      cmd = log.command(id)
+      assert_equal id, cmd[:id]
+      assert_equal "hue.light.abc", cmd[:entity]
+      assert_equal true, cmd[:on]
+      assert_equal "dashboard", cmd[:source]
+      assert_equal NOW, cmd[:requested_at]
+      assert_predicate cmd[:requested_at], :utc?
+      assert_equal "pending", cmd[:status]
+      assert_nil cmd[:resolved_at]
+      assert_nil cmd[:detail]
+
+      log.resolve(id, status: "confirmed", detail: "observed")
+      resolved = log.command(id)
+      assert_equal "confirmed", resolved[:status]
+      refute_nil resolved[:resolved_at]
+      assert_predicate resolved[:resolved_at], :utc?
+      assert_equal "observed", resolved[:detail]
+    end
+  end
+
+  def test_stamp_sets_detail_without_resolving
+    with_log do |log|
+      id = log.request(entity: "hue.light.abc", action: { on: true }, source: "dashboard")
+      log.stamp(id, detail: "accepted")
+      cmd = log.command(id)
+      assert_equal "pending", cmd[:status], "stamp must leave the command open"
+      assert_equal "accepted", cmd[:detail]
+      assert_nil cmd[:resolved_at]
+    end
+  end
+
+  def test_pending_commands_lists_only_open_commands_oldest_first
+    with_log do |log|
+      old = log.request(entity: "hue.light.a", action: { on: true },
+                        source: "dashboard", requested_at: NOW - 120)
+      new = log.request(entity: "hue.light.b", action: { on: false },
+                        source: "dashboard", requested_at: NOW - 30)
+      done = log.request(entity: "hue.light.c", action: { on: true },
+                         source: "dashboard", requested_at: NOW - 60)
+      log.resolve(done, status: "confirmed")
+
+      pending = log.pending_commands
+      assert_equal [old, new], pending.map { |c| c[:id] }
+      assert_equal "hue.light.a", pending.first[:entity]
+      assert_equal true, pending.first[:on]
+      assert_equal NOW - 120, pending.first[:requested_at]
+      assert_predicate pending.first[:requested_at], :utc?
+      assert_equal false, pending.last[:on]
+    end
+  end
+
+  def test_latest_command_returns_newest_command_for_entity_or_nil
+    with_log do |log|
+      assert_nil log.latest_command(entity: "hue.light.a")
+
+      first = log.request(entity: "hue.light.a", action: { on: true },
+                          source: "dashboard", requested_at: NOW - 120)
+      log.resolve(first, status: "confirmed")
+      second = log.request(entity: "hue.light.a", action: { on: false },
+                           source: "dashboard", requested_at: NOW - 10)
+      log.request(entity: "hue.light.other", action: { on: true },
+                  source: "dashboard", requested_at: NOW)
+
+      latest = log.latest_command(entity: "hue.light.a")
+      assert_equal second, latest[:id]
+      assert_equal false, latest[:on]
+      assert_equal "pending", latest[:status]
+      assert_equal NOW - 10, latest[:requested_at]
+      assert_nil latest[:resolved_at]
+    end
+  end
+
+  def test_confirming_state_finds_the_earliest_matching_state_at_or_after_since
+    with_log do |log|
+      record_state(log, "hue.light.a", true, NOW - 3600)  # before since
+      record_state(log, "hue.light.a", false, NOW - 60)   # matches, after since
+      record_state(log, "hue.light.a", false, NOW - 30)   # later duplicate
+
+      observed = log.confirming_state(entity: "hue.light.a", on: false, since: NOW - 120)
+      assert_equal NOW - 60, observed
+      assert_predicate observed, :utc?
+    end
+  end
+
+  def test_confirming_state_is_nil_when_no_matching_state_follows
+    with_log do |log|
+      record_state(log, "hue.light.a", true, NOW - 30) # wrong state
+      assert_nil log.confirming_state(entity: "hue.light.a", on: false, since: NOW - 120)
+      # A matching state that predates the request does not confirm it.
+      record_state(log, "hue.light.a", false, NOW - 300)
+      assert_nil log.confirming_state(entity: "hue.light.a", on: false, since: NOW - 120)
+    end
+  end
+
   def test_state_intervals_empty_without_state_events
     with_log do |log|
       log.record(observed: NOW - 60, source: "janus", entity: "hue",
