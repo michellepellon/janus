@@ -15,22 +15,26 @@
   <header>
     <div class="masthead">
       <h1>Janus</h1>
-      <div id="generated" class="generated"></div>
-      <button id="theme" class="themetoggle" type="button"></button>
+      <!-- The range presets live on the masthead because they govern every
+           module's window, paired with the freshness line they qualify. -->
+      <div class="mastmeta">
+        <div id="generated" class="generated"></div>
+        <nav id="presets" class="presets" aria-label="time range"></nav>
+        <button id="theme" class="themetoggle" type="button"></button>
+      </div>
     </div>
   </header>
   <main>
     <section class="module" aria-labelledby="climate-title">
       <div class="module-head">
         <h2 class="module-title" id="climate-title">house climate</h2>
-        <nav id="presets" class="presets" aria-label="time range"></nav>
       </div>
       <div id="cooling"></div>
       <div id="sensors"></div>
     </section>
     <!-- Hidden until /api/dashboard reports devices (a paired Hue bridge).
-         The time-range presets stay global in the climate module head and
-         drive this module's window too. -->
+         The masthead's global time-range presets drive this module's
+         window too. -->
     <section class="module" id="lights-module" aria-labelledby="lights-title" hidden>
       <div class="module-head">
         <h2 class="module-title" id="lights-title">lights &amp; outlets</h2>

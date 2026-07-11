@@ -133,12 +133,13 @@ function fmtHum(v) {
   return Math.round(v) + "% rh";
 }
 
-// Compact timestamp for tooltips and tables: weekday-prefixed up to a week
+// Compact timestamp for tooltips and tables: weekday-prefixed below a week
 // (even a 24 h window crosses midnight, so bare clocks would repeat),
-// date-prefixed for a month (weekdays repeat).
+// date-prefixed from a full week up (a 168 h window already holds two of the
+// same weekday; a month repeats them freely).
 function fmtTimeShort(date, hours) {
   var clock = fmtClock(date);
-  if (hours <= 168) return DAY_SHORT[date.getDay()] + " " + clock;
+  if (hours < 168) return DAY_SHORT[date.getDay()] + " " + clock;
   return MONTH_SHORT[date.getMonth()] + " " + date.getDate() + ", " + clock;
 }
 
@@ -305,20 +306,34 @@ function unknownRanges(segments, xDomain) {
   return out;
 }
 
-// State recorded at tMs: {on, sinceMs} where sinceMs is when that state
-// began (clipped to the queried window server-side), or null when no state
-// is recorded there. On a shared boundary the later interval wins — the
-// state changed at that instant.
+// State recorded at tMs: {on, sinceMs, clipped} where sinceMs is when that
+// state began — or, when clipped, the window edge the server truncated it to
+// (the state is older than the window shows) — or null when no state is
+// recorded there. On a shared boundary the later interval wins — the state
+// changed at that instant.
 function stateAtTime(intervals, tMs) {
   var list = intervals || [];
   for (var i = 0; i < list.length; i++) {
     var ms = intervalMs(list[i]);
     var last = i === list.length - 1;
     if (tMs >= ms[0] && (tMs < ms[1] || (last && tMs <= ms[1]))) {
-      return { on: list[i].on, sinceMs: ms[0] };
+      return { on: list[i].on, sinceMs: ms[0], clipped: list[i].clipped === true };
     }
   }
   return null;
+}
+
+// Tooltip time line for a state: a clipped start says "since before" the
+// window edge rather than presenting the edge as when the state began.
+function sinceLabel(st, hours) {
+  var prefix = st.clipped ? "since before " : "since ";
+  return prefix + fmtTimeShort(new Date(st.sinceMs), hours);
+}
+
+// How long the state has held, for the row's state line: a clipped start
+// makes the duration a floor, so the figure carries a "+".
+function heldForLabel(st, endMs) {
+  return "for " + fmtDuration(endMs - st.sinceMs) + (st.clipped ? "+" : "");
 }
 
 // Compact duration from the two largest units: "3 h 40 m", "2 d 5 h",
@@ -335,11 +350,83 @@ function fmtDuration(ms) {
 
 var THEME_MODES = ["auto", "light", "dark"];
 
-// Next mode in the auto -> light -> dark cycle; unknown input counts as auto.
-function nextTheme(current) {
-  var i = THEME_MODES.indexOf(current);
+// Next theme mode, ordered against the resolved scheme (what "auto" currently
+// looks like) so no step flashes the opposite palette: from auto the first
+// step pins the appearance already on screen, the next is the deliberate
+// opposite, then back to auto. Unknown mode counts as auto; unknown scheme
+// as light.
+function nextTheme(current, resolvedScheme) {
+  var pinned = resolvedScheme === "dark" ? "dark" : "light";
+  var order = ["auto", pinned, pinned === "dark" ? "light" : "dark"];
+  var i = order.indexOf(current);
   if (i === -1) i = 0;
-  return THEME_MODES[(i + 1) % THEME_MODES.length];
+  return order[(i + 1) % order.length];
+}
+
+// Lifecycle of the range presets: a click may show its preset as selected
+// while the fetch is in flight, but the committed range — the one the charts
+// actually display and the URL carries — only advances when that fetch lands.
+// State: { committed, requested }, requested null when nothing is in flight.
+function rangeReducer(state, action) {
+  switch (action.type) {
+    case "request":
+      return { committed: state.committed, requested: action.hours };
+    case "loaded":
+      if (!rangeAccepts(state, action.hours)) return state;
+      return { committed: action.hours, requested: null };
+    case "failed":
+      // Only the in-flight request's failure reverts; a stale failure from a
+      // range no longer asked for must not clear a newer request.
+      if (state.requested !== null && action.hours !== state.requested) return state;
+      return { committed: state.committed, requested: null };
+    default:
+      return state;
+  }
+}
+
+// Whether a response for +hours+ answers the range currently being asked for:
+// the in-flight request when one exists, else the committed range (a
+// background refresh). Anything else is stale and must not render.
+function rangeAccepts(state, hours) {
+  return state.requested !== null ? hours === state.requested : hours === state.committed;
+}
+
+// The range the presets control shows as selected: the in-flight request when
+// one exists (optimistic, reverted by "failed"), else the committed range.
+function rangeShown(state) {
+  return state.requested !== null ? state.requested : state.committed;
+}
+
+// Stable identity for a focusable element across full rebuilds, so focus can
+// be restored after a re-render. kind and part come from fixed vocabularies;
+// the id (sensor/device) may contain anything, so it rides last and unsplit.
+function focusKey(kind, part, id) {
+  return kind + "|" + part + "|" + id;
+}
+
+function parseFocusKey(key) {
+  if (!key) return null;
+  var a = key.indexOf("|");
+  if (a === -1) return null;
+  var b = key.indexOf("|", a + 1);
+  if (b === -1) return null;
+  return { kind: key.slice(0, a), part: key.slice(a + 1, b), id: key.slice(b + 1) };
+}
+
+// Bucket width (minutes) the server serves for an hours-long window — the
+// same math as Janus::Store#bucket_window over its 144-point series cap,
+// mirrored here the way expectedIntervals mirrors the schedule math.
+function bucketMinutesFor(hours) {
+  return Math.ceil((hours * 60) / 144);
+}
+
+// The readings disclosure named by what the table holds: raw-cadence
+// readings for fine buckets, averages labeled with their bucket otherwise.
+function tableSummaryLabel(bucketMinutes) {
+  if (!bucketMinutes || bucketMinutes <= 10) return "readings";
+  if (bucketMinutes === 60) return "hourly averages";
+  if (bucketMinutes % 60 === 0) return "bucket averages — " + (bucketMinutes / 60) + " h";
+  return "bucket averages — " + bucketMinutes + " min";
 }
 
 // The acting register for a device's switch: "pending" while a command is in
@@ -521,6 +608,10 @@ if (typeof document !== "undefined") {
       ["page", "muted", "secondary", "hairline", "temp", "hum", "lights"].forEach(function (name) {
         colors[name] = cs.getPropertyValue("--" + name).trim();
       });
+      // Wash opacities are per-theme too: values that read on cream vanish
+      // on the dark page, so the stylesheet owns them alongside the colors.
+      colors.washOpacity = cs.getPropertyValue("--wash-opacity").trim() || "0.1";
+      colors.unknownOpacity = cs.getPropertyValue("--unknown-opacity").trim() || "0.3";
     }
     var PRESETS = [
       { hours: 24, label: "24 h" },
@@ -534,7 +625,10 @@ if (typeof document !== "undefined") {
     var POLL_MS = 1500;
     var POLL_CAP_MS = 35 * 1000;
 
-    var state = { hours: 24, data: null };
+    var state = { data: null };
+    // The range presets' lifecycle (see rangeReducer): committed is the range
+    // the charts actually display; requested is an in-flight preset click.
+    var range = { committed: 24, requested: null };
     // Per-device command lifecycle, keyed by device id, kept across renders so
     // an in-flight or just-failed control survives the periodic refresh. Absent
     // means the switch simply mirrors the recorded state.
@@ -568,6 +662,40 @@ if (typeof document !== "undefined") {
 
     function hideTooltip() {
       tooltip.style.display = "none";
+    }
+
+    // One crosshair-and-tooltip owner at a time: a chart claiming the hover
+    // clears whichever chart held it before, wherever on the page it lives.
+    // Owners register a clear function (which must release itself) plus a
+    // scope so a partial rebuild can clear only its own module's hover.
+    var hoverOwner = null;
+    function claimHover(clear, scope) {
+      if (hoverOwner && hoverOwner.clear !== clear) hoverOwner.clear();
+      hoverOwner = { clear: clear, scope: scope };
+    }
+    function releaseHover(clear) {
+      if (hoverOwner && hoverOwner.clear === clear) hoverOwner = null;
+    }
+    // Clears the active hover UI (all of it, or only one scope's) so a
+    // rebuild never leaves an orphaned crosshair or tooltip behind.
+    function clearHover(scope) {
+      if (hoverOwner && (!scope || hoverOwner.scope === scope)) hoverOwner.clear();
+      if (!scope) hideTooltip();
+    }
+
+    // Focus survival across full rebuilds: focusable elements carry a stable
+    // identity in data-focus-key; capture before tearing down, restore after.
+    function stampFocus(node, kind, part, id) {
+      node.dataset.focusKey = focusKey(kind, part, id);
+    }
+    function captureFocus() {
+      var active = document.activeElement;
+      return (active && active.dataset && active.dataset.focusKey) || null;
+    }
+    function restoreFocus(key) {
+      if (!key) return;
+      var match = document.querySelector('[data-focus-key="' + CSS.escape(key) + '"]');
+      if (match) match.focus();
     }
 
     // Position the tooltip beside a chart point given in viewBox coordinates.
@@ -615,6 +743,7 @@ if (typeof document !== "undefined") {
         tabindex: "0",
         "aria-label": opts.ariaLabel,
       });
+      if (opts.focus) stampFocus(svg, opts.focus.kind, opts.focus.part, opts.focus.id);
       plot.appendChild(svg);
 
       var padTop = opts.padTop, padBottom = opts.padBottom;
@@ -695,22 +824,44 @@ if (typeof document !== "undefined") {
       });
       svg.appendChild(crosshair);
 
-      var activeIdx = -1;
-      function showAt(idx) {
-        if (idx < 0 || idx >= points.length) return;
-        activeIdx = idx;
-        var p = points[idx];
-        var x = xs(pointMs(p));
+      function placeCrosshair(x) {
         crosshair.setAttribute("x1", x.toFixed(2));
         crosshair.setAttribute("x2", x.toFixed(2));
         crosshair.style.display = "";
+      }
+
+      // Linked crosshair within a sensor: peers in opts.link mirror this
+      // chart's crosshair position (no second tooltip) and vice versa.
+      function mirror(xMs) {
+        if (xMs === null) { crosshair.style.display = "none"; return; }
+        placeCrosshair(xs(xMs));
+      }
+      if (opts.link) opts.link.peers.push(mirror);
+      function broadcast(xMs) {
+        if (!opts.link) return;
+        for (var b = 0; b < opts.link.peers.length; b++) {
+          if (opts.link.peers[b] !== mirror) opts.link.peers[b](xMs);
+        }
+      }
+
+      var activeIdx = -1;
+      function showAt(idx) {
+        if (idx < 0 || idx >= points.length) return;
+        claimHover(clear, opts.hoverScope);
+        activeIdx = idx;
+        var p = points[idx];
+        var x = xs(pointMs(p));
+        placeCrosshair(x);
+        broadcast(pointMs(p));
         showTooltip(svg, height, x, ys(p[key]),
           opts.fmtValue(p[key]),
           fmtTimeShort(new Date(pointMs(p)), opts.hours));
       }
       function clear() {
+        releaseHover(clear);
         activeIdx = -1;
         crosshair.style.display = "none";
+        broadcast(null);
         hideTooltip();
       }
 
@@ -762,7 +913,9 @@ if (typeof document !== "undefined") {
 
     function buildDataTable(points, hours) {
       var details = el("details", "datatable");
-      details.appendChild(el("summary", null, "readings"));
+      // Named by what the rows are: raw readings at fine buckets, bucket
+      // averages once the range coarsens them.
+      details.appendChild(el("summary", null, tableSummaryLabel(bucketMinutesFor(hours))));
       var scroller = el("div", "tablescroll");
       var table = document.createElement("table");
       var thead = document.createElement("thead");
@@ -817,6 +970,9 @@ if (typeof document !== "undefined") {
         return section;
       }
 
+      // The sensor's two charts share a crosshair link: hovering one mirrors
+      // the position (without a tooltip) on the other.
+      var link = { peers: [] };
       charts.appendChild(buildChart({
         points: sensor.series, key: "temp",
         height: 96, padTop: 20, padBottom: 18,
@@ -825,6 +981,8 @@ if (typeof document !== "undefined") {
         ariaLabel: sensor.name + " temperature, " + hoursLabel(hours),
         fmtValue: fmtTemp,
         fmtLabel: fmtTemp,
+        link: link, hoverScope: "climate",
+        focus: { kind: "sensor", part: "temp", id: sensor.id },
       }));
       charts.appendChild(buildTicksRow(xDomain, hours));
       charts.appendChild(buildChart({
@@ -835,9 +993,12 @@ if (typeof document !== "undefined") {
         ariaLabel: sensor.name + " humidity, " + hoursLabel(hours),
         fmtValue: fmtHum,
         fmtLabel: function (v) { return Math.round(v) + "%"; },
+        link: link, hoverScope: "climate",
+        focus: { kind: "sensor", part: "hum", id: sensor.id },
       }));
       var table = buildDataTable(sensor.series, hours);
       table.dataset.sensorId = sensor.id;
+      stampFocus(table.querySelector("summary"), "sensor", "table", sensor.id);
       if (openTables && openTables[sensor.id]) table.open = true;
       charts.appendChild(table);
       section.appendChild(charts);
@@ -862,15 +1023,19 @@ if (typeof document !== "undefined") {
 
       var points = cooling.series;
       var charts = el("div", "charts");
+      // The key row names both bases on show: the sentence above reads the
+      // latest readings; the chart draws bucket means.
       charts.appendChild(buildChart({
         points: points, key: "delta",
         height: 72, padTop: 14, padBottom: 12,
-        color: colors.secondary, unitLabel: "Δ °F, outside − house",
+        color: colors.secondary, unitLabel: "Δ °F, outside − house · bucket means",
         xDomain: xDomain, hours: hours,
         ariaLabel: "Outside minus house temperature difference, " + hoursLabel(hours),
         fmtValue: function (v) { return "Δ " + fmtDelta(v); },
         fmtLabel: fmtDelta,
         includeZero: true,
+        hoverScope: "climate",
+        focus: { kind: "cooling", part: "delta", id: "" },
         decorate: function (svg, xs, ys) {
           var y0 = ys(0).toFixed(2);
           var gapSegs = segmentSeries(points);
@@ -885,7 +1050,7 @@ if (typeof document !== "undefined") {
               svg.appendChild(svgEl("path", {
                 d: d,
                 fill: run.sign >= 0 ? colors.temp : colors.hum,
-                "fill-opacity": "0.1",
+                "fill-opacity": colors.washOpacity,
                 stroke: "none",
               }));
             }
@@ -896,6 +1061,7 @@ if (typeof document !== "undefined") {
           }));
         },
       }));
+      charts.appendChild(buildTicksRow(xDomain, hours));
       strip.appendChild(charts);
       return strip;
     }
@@ -915,6 +1081,7 @@ if (typeof document !== "undefined") {
         tabindex: "0",
         "aria-label": device.name + " on/off history, " + hoursLabel(hours),
       });
+      stampFocus(svg, "device", "strip", device.id);
       wrap.appendChild(svg);
 
       var xs = linScale(xDomain, [PAD_X, VBW - PAD_X]);
@@ -933,7 +1100,7 @@ if (typeof document !== "undefined") {
 
       var gaps = unknownRanges(segments, xDomain);
       for (var g = 0; g < gaps.length; g++) {
-        band(gaps[g].fromMs, gaps[g].toMs, colors.hairline, "0.3");
+        band(gaps[g].fromMs, gaps[g].toMs, colors.hairline, colors.unknownOpacity);
       }
       for (var s = 0; s < segments.length; s++) {
         if (segments[s].on) band(segments[s].fromMs, segments[s].toMs, colors.lights, "1");
@@ -971,15 +1138,17 @@ if (typeof document !== "undefined") {
       function showAtMs(xMs) {
         var st = stateAtTime(device.intervals, xMs);
         if (!st) { clear(); return; }
+        claimHover(clear, "devices");
         var x = xs(xMs);
         crosshair.setAttribute("x1", x.toFixed(2));
         crosshair.setAttribute("x2", x.toFixed(2));
         crosshair.style.display = "";
         showTooltip(svg, height, x, height / 2,
           st.on ? "on" : "off",
-          "since " + fmtTimeShort(new Date(st.sinceMs), hours));
+          sinceLabel(st, hours));
       }
       function clear() {
+        releaseHover(clear);
         activeStop = -1;
         crosshair.style.display = "none";
         hideTooltip();
@@ -1038,6 +1207,7 @@ if (typeof document !== "undefined") {
         tabindex: "0",
         "aria-label": device.name + " scheduled on " + scheduleLabel(device.schedule),
       });
+      stampFocus(svg, "device", "expected", device.id);
       var xs = linScale(xDomain, [PAD_X, VBW - PAD_X]);
       for (var i = 0; i < intervals.length; i++) {
         svg.appendChild(svgEl("rect", {
@@ -1053,28 +1223,33 @@ if (typeof document !== "undefined") {
         }));
       }
 
+      function clear() {
+        releaseHover(clear);
+        hideTooltip();
+      }
       function showAtMs(xMs) {
         for (var j = 0; j < intervals.length; j++) {
           if (xMs >= intervals[j].fromMs && xMs <= intervals[j].toMs) {
+            claimHover(clear, "devices");
             showTooltip(svg, height, xs(xMs), height / 2,
               "scheduled on", scheduleLabel(device.schedule));
             return;
           }
         }
-        hideTooltip();
+        clear();
       }
       svg.addEventListener("pointermove", function (e) {
         var rect = svg.getBoundingClientRect();
         showAtMs(xs.invert(((e.clientX - rect.left) / rect.width) * VBW));
       });
-      svg.addEventListener("pointerleave", hideTooltip);
+      svg.addEventListener("pointerleave", clear);
       svg.addEventListener("focus", function () {
         var last = intervals[intervals.length - 1];
         showAtMs((last.fromMs + last.toMs) / 2);
       });
-      svg.addEventListener("blur", hideTooltip);
+      svg.addEventListener("blur", clear);
       svg.addEventListener("keydown", function (e) {
-        if (e.key === "Escape") hideTooltip();
+        if (e.key === "Escape") clear();
       });
       return svg;
     }
@@ -1105,7 +1280,9 @@ if (typeof document !== "undefined") {
       var ed = editorFor(device);
       var st = ed.state;
       var details = el("details", "schededitor");
-      details.appendChild(el("summary", null, "schedule"));
+      var summary = el("summary", null, "schedule");
+      stampFocus(summary, "device", "sched", device.id);
+      details.appendChild(summary);
       if (ed.open) details.open = true;
       details.addEventListener("toggle", function () {
         ed.open = details.open;
@@ -1120,6 +1297,7 @@ if (typeof document !== "undefined") {
         var input = document.createElement("input");
         input.type = "time";
         input.value = st[pair[1]];
+        stampFocus(input, "device", "sched-" + pair[0], device.id);
         input.setAttribute("aria-label", device.name + " " + pair[0] + " time");
         if (st.errors[pair[1]]) input.setAttribute("aria-invalid", "true");
         input.addEventListener("input", function () {
@@ -1138,6 +1316,7 @@ if (typeof document !== "undefined") {
         var active = st.days.indexOf(day) !== -1;
         var chip = el("button", "daychip" + (active ? " active" : ""), DAY_LETTERS[i]);
         chip.type = "button";
+        stampFocus(chip, "device", "day-" + day, device.id);
         chip.setAttribute("role", "checkbox");
         chip.setAttribute("aria-checked", active ? "true" : "false");
         chip.setAttribute("aria-label", DAY_FULL[i]);
@@ -1155,6 +1334,7 @@ if (typeof document !== "undefined") {
       var enabledLabel = el("label", "schedenabled");
       var enabledInput = document.createElement("input");
       enabledInput.type = "checkbox";
+      stampFocus(enabledInput, "device", "sched-enabled", device.id);
       enabledInput.checked = st.enabled;
       enabledInput.addEventListener("change", function () {
         ed.state = scheduleEditorReducer(ed.state, { type: "set_enabled", value: enabledInput.checked });
@@ -1167,12 +1347,14 @@ if (typeof document !== "undefined") {
       var actions = el("div", "schedactions");
       var save = el("button", "schedbtn", st.phase === "saving" ? "saving…" : "save");
       save.type = "button";
+      stampFocus(save, "device", "sched-save", device.id);
       if (st.phase === "saving") save.disabled = true;
       save.addEventListener("click", function () { submitSchedule(device); });
       actions.appendChild(save);
       if (device.schedule) {
         var remove = el("button", "schedbtn", "remove");
         remove.type = "button";
+        stampFocus(remove, "device", "sched-remove", device.id);
         remove.addEventListener("click", function () { removeSchedule(device); });
         actions.appendChild(remove);
       }
@@ -1273,6 +1455,7 @@ if (typeof document !== "undefined") {
 
       var btn = el("button", "switch " + display);
       btn.type = "button";
+      stampFocus(btn, "device", "switch", device.id);
       btn.setAttribute("role", "switch");
       btn.setAttribute("aria-checked", committedOn ? "true" : "false");
       btn.setAttribute("aria-label", device.name);
@@ -1295,12 +1478,13 @@ if (typeof document !== "undefined") {
       } else {
         stateRow.appendChild(el("span", "state " + (device.on ? "ison" : "isoff"),
           device.on ? "on" : "off"));
-        // How long the current state has held (from the recorded journal,
-        // clipped to the window like everything else on the page).
+        // How long the current state has held, from the recorded journal. A
+        // state older than the window is a floor, not a measurement, and the
+        // "+" says so.
         var current = stateAtTime(device.intervals, xDomain[1]);
         if (current && current.on === device.on) {
           stateRow.appendChild(el("span", "statefor",
-            " for " + fmtDuration(xDomain[1] - current.sinceMs)));
+            " " + heldForLabel(current, xDomain[1])));
         }
       }
       // A quiet marker when the last command did not confirm; it clears on the
@@ -1328,12 +1512,17 @@ if (typeof document !== "undefined") {
     }
 
     // Rebuild just the lights module from the current data, so a control state
-    // change repaints its switch without disturbing the sensor charts.
+    // change repaints its switch without disturbing the sensor charts. Focus
+    // inside the module survives the rebuild by identity; any hover UI the
+    // module owned is cleared rather than left orphaned.
     function rerenderDevices() {
       if (!state.data) return;
+      var focused = captureFocus();
+      clearHover("devices");
       var endMs = Date.parse(state.data.generated_at);
       var xDomain = [endMs - state.data.hours * 3600 * 1000, endMs];
       renderDevices(state.data.devices, xDomain, state.data.hours);
+      restoreFocus(focused);
     }
 
     // The device object currently in state.data, or null if it has gone.
@@ -1400,7 +1589,7 @@ if (typeof document !== "undefined") {
             cur = controls[id] = commandReducer(cur, { type: "status", status: data.status });
             if (cur.phase === "confirmed") {
               delete controls[id];
-              load(state.hours); // the confirming state event extends the strip
+              load(range.committed); // the confirming state event extends the strip
             } else if (cur.phase === "failed") {
               rerenderDevices();
             } else {
@@ -1460,7 +1649,11 @@ if (typeof document !== "undefined") {
     }
 
     function render(data) {
-      hideTooltip();
+      // A full rebuild: remember who held focus (by stable identity), drop
+      // any live hover UI with the elements that owned it, and restore focus
+      // into the fresh DOM at the end.
+      var focused = captureFocus();
+      clearHover();
       readColors();
       // The timestamp is the data's freshness, not a wall clock, so say so.
       // Assigning textContent also drops any pending update-failure marker.
@@ -1476,6 +1669,7 @@ if (typeof document !== "undefined") {
       if (!data.sensors || data.sensors.length === 0) {
         showMessage("No readings yet — add SensorPush credentials to .env and run bin/collect.");
         renderDevices(data.devices, xDomain, data.hours);
+        restoreFocus(focused);
         return;
       }
       renderDevices(data.devices, xDomain, data.hours);
@@ -1488,13 +1682,15 @@ if (typeof document !== "undefined") {
         main.appendChild(buildSensor(data.sensors[i], xDomain, data.hours, openTables));
       }
       main.classList.remove("stale");
+      restoreFocus(focused);
     }
 
     function renderPresets() {
       presetsEl.textContent = "";
+      var shown = rangeShown(range);
       for (var i = 0; i < PRESETS.length; i++) {
         if (i > 0) presetsEl.appendChild(el("span", "sep", "·"));
-        var a = el("a", state.hours === PRESETS[i].hours ? "selected" : "", PRESETS[i].label);
+        var a = el("a", shown === PRESETS[i].hours ? "selected" : "", PRESETS[i].label);
         a.href = "?hours=" + PRESETS[i].hours;
         a.dataset.hours = String(PRESETS[i].hours);
         presetsEl.appendChild(a);
@@ -1503,7 +1699,9 @@ if (typeof document !== "undefined") {
 
     // dim=true marks a user-initiated range change, where the old charts no
     // longer answer the question being asked; background refreshes keep the
-    // current render at full strength until new data lands.
+    // current render at full strength until new data lands. The requested
+    // range (and the ?hours= URL) commits only when its fetch lands; a
+    // failure reverts the presets control to the range actually displayed.
     function load(hours, dim) {
       if (dim) {
         main.classList.add("stale");
@@ -1516,10 +1714,19 @@ if (typeof document !== "undefined") {
           return res.json();
         })
         .then(function (data) {
+          if (!rangeAccepts(range, data.hours)) return; // stale response
+          var wasRequested = range.requested !== null;
+          range = rangeReducer(range, { type: "loaded", hours: data.hours });
+          if (wasRequested) {
+            history.replaceState(null, "", "?hours=" + range.committed);
+            renderPresets();
+          }
           state.data = data;
           render(data);
         })
         .catch(function () {
+          range = rangeReducer(range, { type: "failed", hours: hours });
+          renderPresets(); // revert any optimistic selection
           // Keep any previous render on screen; the refresh timer retries.
           if (!state.data) { showMessage("Can't reach the server."); return; }
           main.classList.remove("stale");
@@ -1536,9 +1743,8 @@ if (typeof document !== "undefined") {
       if (!a) return;
       e.preventDefault();
       var hours = parseInt(a.dataset.hours, 10);
-      if (hours === state.hours) return;
-      state.hours = hours;
-      history.replaceState(null, "", "?hours=" + hours);
+      if (hours === rangeShown(range)) return;
+      range = rangeReducer(range, { type: "request", hours: hours });
       renderPresets();
       load(hours, true);
     });
@@ -1560,7 +1766,10 @@ if (typeof document !== "undefined") {
     }
 
     themeBtn.addEventListener("click", function () {
-      theme = nextTheme(theme);
+      // The cycle is ordered against the resolved scheme so no step flashes
+      // the opposite palette: from auto it first pins what is on screen.
+      var resolved = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      theme = nextTheme(theme, resolved);
       try { localStorage.setItem(THEME_STORAGE_KEY, theme); } catch (e) { /* private mode */ }
       applyTheme();
       // Redraw so canvas-side colors (SVG strokes, washes, dot rings,
@@ -1578,10 +1787,10 @@ if (typeof document !== "undefined") {
     });
 
     var param = parseInt(new URLSearchParams(location.search).get("hours"), 10);
-    if ([24, 72, 168, 720].indexOf(param) !== -1) state.hours = param;
+    if ([24, 72, 168, 720].indexOf(param) !== -1) range.committed = param;
     renderPresets();
-    load(state.hours);
-    setInterval(function () { load(state.hours); }, REFRESH_MS);
+    load(range.committed);
+    setInterval(function () { load(range.committed); }, REFRESH_MS);
   })();
 }
 
@@ -1611,7 +1820,16 @@ if (typeof module !== "undefined") {
     intervalSegments: intervalSegments,
     unknownRanges: unknownRanges,
     stateAtTime: stateAtTime,
+    sinceLabel: sinceLabel,
+    heldForLabel: heldForLabel,
     fmtDuration: fmtDuration,
+    rangeReducer: rangeReducer,
+    rangeAccepts: rangeAccepts,
+    rangeShown: rangeShown,
+    focusKey: focusKey,
+    parseFocusKey: parseFocusKey,
+    bucketMinutesFor: bucketMinutesFor,
+    tableSummaryLabel: tableSummaryLabel,
     switchState: switchState,
     nextOn: nextOn,
     commandReducer: commandReducer,

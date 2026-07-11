@@ -254,12 +254,27 @@ class AppTest < Minitest::Test
     intervals = device["intervals"]
     assert_equal 2, intervals.size
     intervals.each do |interval|
-      assert_equal %w[from on to], interval.keys.sort
+      assert_equal %w[clipped from on to], interval.keys.sort
       assert_match ISO8601_Z, interval["from"]
       assert_match ISO8601_Z, interval["to"]
     end
     assert_equal [true, false], intervals.map { |interval| interval["on"] }
+    assert_equal [false, false], intervals.map { |interval| interval["clipped"] },
+                 "in-window state changes are not clipped"
     assert_equal intervals[0]["to"], intervals[1]["from"], "intervals abut at the state change"
+  end
+
+  def test_interval_carried_in_from_before_the_window_serializes_as_clipped
+    now = Time.now.utc
+    seed_device
+    @event_log.record(observed: now - (30 * 3600), source: "hue", entity: "hue.light.abc",
+                      kind: "state", payload: { on: true })
+
+    get "/api/dashboard"
+    intervals = JSON.parse(last_response.body).fetch("devices").first.fetch("intervals")
+    assert_equal 1, intervals.size
+    assert_equal true, intervals.first["clipped"],
+                 "a state persisting from before the window must say its start is the window edge"
   end
 
   def test_device_without_state_events_reads_as_unknown_not_off
@@ -284,6 +299,35 @@ class AppTest < Minitest::Test
     assert_equal "pending", last["status"]
     assert_match ISO8601_Z, last["requested_at"]
     assert_nil last["resolved_at"]
+  end
+
+  def test_dashboard_reconciles_stale_pending_commands
+    id = seed_device
+    now = Time.now.utc
+    # A pending command well past the confirmation timeout — a reload must not
+    # show it pulsing forever; serving the dashboard reconciles it.
+    cid = @event_log.request(entity: id, action: { on: true }, source: "dashboard",
+                             requested_at: now - 120)
+
+    get "/api/dashboard"
+    device = JSON.parse(last_response.body).fetch("devices").first
+    assert_equal false, device["pending"], "a stale pending command reconciles on serve"
+    assert_equal "failed", device.dig("last_command", "status")
+    assert_equal "failed", @event_log.command(cid)[:status]
+  end
+
+  def test_dashboard_confirms_a_pending_command_from_an_observed_state
+    id = seed_device
+    now = Time.now.utc
+    @event_log.request(entity: id, action: { on: true }, source: "dashboard",
+                       requested_at: now - 10)
+    @event_log.record(observed: now - 2, source: "hue", entity: id, kind: "state",
+                      payload: { on: true })
+
+    get "/api/dashboard"
+    device = JSON.parse(last_response.body).fetch("devices").first
+    assert_equal false, device["pending"]
+    assert_equal "confirmed", device.dig("last_command", "status")
   end
 
   def test_toggle_records_a_pending_command_and_calls_the_bridge

@@ -324,12 +324,15 @@ module Janus
     # a source (Hue today) has registered devices — the frontend hides the
     # module entirely then. Intervals are looked up for every entity at once
     # and joined by device id; a device with no state events gets on: nil and
-    # no intervals. Absence of events is unknown, never "off".
+    # no intervals. Absence of events is unknown, never "off". Pending
+    # commands reconcile before serialization so a reloaded page never shows
+    # a command pulsing past its confirmation timeout.
     def serialize_devices(hours)
       devices = self.class.store.devices
       return [] if devices.empty?
 
       now = Time.now.getutc
+      self.class.commander.reconcile_pending(now: now)
       intervals_by_entity = self.class.event_log.state_intervals(entity_prefix: "", hours: hours, now: now)
       deviations_by_entity = self.class.event_log.events_in(hours: hours, kinds: ["deviation"], now: now)
                                  .group_by { |event| event[:entity] }
@@ -348,7 +351,8 @@ module Janus
           schedule: schedule && serialize_schedule(schedule),
           adherence: serialize_adherence(schedule, deviations_by_entity[device[:id]] || [], hours, now),
           intervals: (intervals_by_entity[device[:id]] || []).map do |interval|
-            { from: interval[:from].iso8601, to: interval[:to].iso8601, on: interval[:on] }
+            { from: interval[:from].iso8601, to: interval[:to].iso8601,
+              on: interval[:on], clipped: interval[:clipped] }
           end
         }
       end

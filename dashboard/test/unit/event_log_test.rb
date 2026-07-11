@@ -217,7 +217,7 @@ class EventLogTest < Minitest::Test
 
       intervals = log.state_intervals(entity_prefix: "hue.", hours: 24, now: NOW)
       assert_equal(
-        { "hue.light.a" => [{ from: NOW - 3600, to: NOW, on: true }] },
+        { "hue.light.a" => [{ from: NOW - 3600, to: NOW, on: true, clipped: false }] },
         intervals
       )
     end
@@ -231,22 +231,22 @@ class EventLogTest < Minitest::Test
 
       intervals = log.state_intervals(entity_prefix: "hue.", hours: 24, now: NOW)
       assert_equal [
-        { from: NOW - 7200, to: NOW - 3600, on: true },
-        { from: NOW - 3600, to: NOW - 600, on: false },
-        { from: NOW - 600, to: NOW, on: true }
+        { from: NOW - 7200, to: NOW - 3600, on: true, clipped: false },
+        { from: NOW - 3600, to: NOW - 600, on: false, clipped: false },
+        { from: NOW - 600, to: NOW, on: true, clipped: false }
       ], intervals.fetch("hue.light.a")
     end
   end
 
-  def test_state_intervals_clips_carried_in_state_to_window_start
+  def test_state_intervals_clips_carried_in_state_to_window_start_and_marks_it
     with_log do |log|
       record_state(log, "hue.light.a", true, NOW - (30 * 3600)) # before window
       record_state(log, "hue.light.a", false, NOW - 3600)
 
       intervals = log.state_intervals(entity_prefix: "hue.", hours: 24, now: NOW)
       assert_equal [
-        { from: NOW - (24 * 3600), to: NOW - 3600, on: true },
-        { from: NOW - 3600, to: NOW, on: false }
+        { from: NOW - (24 * 3600), to: NOW - 3600, on: true, clipped: true },
+        { from: NOW - 3600, to: NOW, on: false, clipped: false }
       ], intervals.fetch("hue.light.a")
     end
   end
@@ -259,8 +259,20 @@ class EventLogTest < Minitest::Test
 
       intervals = log.state_intervals(entity_prefix: "hue.", hours: 24, now: NOW)
       assert_equal [
-        { from: NOW - 7200, to: NOW - 600, on: true },
-        { from: NOW - 600, to: NOW, on: false }
+        { from: NOW - 7200, to: NOW - 600, on: true, clipped: false },
+        { from: NOW - 600, to: NOW, on: false, clipped: false }
+      ], intervals.fetch("hue.light.a")
+    end
+  end
+
+  def test_state_intervals_carried_state_stays_clipped_through_a_merged_re_record
+    with_log do |log|
+      record_state(log, "hue.light.a", true, NOW - (30 * 3600)) # before window
+      record_state(log, "hue.light.a", true, NOW - 3600) # re-recorded, no change
+
+      intervals = log.state_intervals(entity_prefix: "hue.", hours: 24, now: NOW)
+      assert_equal [
+        { from: NOW - (24 * 3600), to: NOW, on: true, clipped: true }
       ], intervals.fetch("hue.light.a")
     end
   end
@@ -273,7 +285,8 @@ class EventLogTest < Minitest::Test
 
       intervals = log.state_intervals(entity_prefix: "hue.", hours: 24, now: NOW)
       assert_equal %w[hue.light.a hue.light.b], intervals.keys.sort
-      assert_equal [{ from: NOW - 1800, to: NOW, on: false }], intervals["hue.light.b"]
+      assert_equal [{ from: NOW - 1800, to: NOW, on: false, clipped: false }],
+                   intervals["hue.light.b"]
     end
   end
 
