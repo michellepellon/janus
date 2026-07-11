@@ -6,6 +6,7 @@ require "json"
 require "time"
 require_relative "store"
 require_relative "event_log"
+require_relative "schedules"
 require_relative "commander"
 require_relative "hue"
 require_relative "dew_point"
@@ -42,6 +43,13 @@ module Janus
     def self.event_log
       set :event_log, EventLog.new(store: store)
       settings.event_log
+    end
+
+    # The shared Schedules over the same store, lazily opened the same way so
+    # tests can inject their own before first use.
+    def self.schedules
+      set :schedules, Schedules.new(store: store)
+      settings.schedules
     end
 
     # The shared Commander over the same event log, wired to a Hue client only
@@ -134,6 +142,47 @@ module Janus
       JSON.generate(serialize_command(cmd))
     end
 
+    # Every device schedule, for the editor's initial state.
+    get "/api/schedules" do
+      content_type "application/json"
+      JSON.generate(self.class.schedules.all.map { |row| serialize_schedule(row) })
+    end
+
+    # Creates or replaces the one schedule for a device. Schedule times are
+    # LOCAL wall clock in the server's zone (see Janus::Schedules). Invalid
+    # input answers 422 with per-field errors; a malformed body 400 — never
+    # a 500.
+    put "/api/schedules/:entity" do
+      content_type "application/json"
+      body = parse_schedule_body(request)
+      if body.nil?
+        status 400
+        return JSON.generate(error: "body must be {\"on_time\", \"off_time\", \"days\", \"enabled\"}")
+      end
+      unless self.class.store.devices.any? { |device| device[:id] == params["entity"] }
+        status 404
+        return JSON.generate(error: "unknown device")
+      end
+
+      begin
+        row = self.class.schedules.upsert(entity: params["entity"], **body)
+        JSON.generate(serialize_schedule(row))
+      rescue Schedules::ValidationError => e
+        status 422
+        JSON.generate(errors: e.errors)
+      end
+    end
+
+    delete "/api/schedules/:entity" do
+      if self.class.schedules.delete(params["entity"])
+        status 204
+      else
+        content_type "application/json"
+        status 404
+        JSON.generate(error: "no schedule for that device")
+      end
+    end
+
     get "/" do
       cache_control :no_cache
       send_file File.join(settings.public_folder, "index.html")
@@ -151,6 +200,31 @@ module Janus
       on if on == true || on == false
     rescue JSON::ParserError
       nil
+    end
+
+    # The schedule fields from a PUT body, or nil when the body is not a JSON
+    # object. Values pass through untouched — Schedules#upsert validates them
+    # into per-field errors, so only an unparseable body is a 400.
+    def parse_schedule_body(request)
+      parsed = JSON.parse(request.body.read)
+      return nil unless parsed.is_a?(Hash)
+
+      { on_time: parsed["on_time"], off_time: parsed["off_time"],
+        days: parsed["days"], enabled: parsed["enabled"] }
+    rescue JSON::ParserError
+      nil
+    end
+
+    def serialize_schedule(row)
+      {
+        entity: row[:entity],
+        on_time: row[:on_time],
+        off_time: row[:off_time],
+        days: row[:days],
+        enabled: row[:enabled],
+        created_at: row[:created_at]&.iso8601,
+        updated_at: row[:updated_at]&.iso8601
+      }
     end
 
     def serialize_command(cmd)
@@ -255,10 +329,14 @@ module Janus
       devices = self.class.store.devices
       return [] if devices.empty?
 
-      intervals_by_entity = self.class.event_log.state_intervals(entity_prefix: "", hours: hours)
+      now = Time.now.getutc
+      intervals_by_entity = self.class.event_log.state_intervals(entity_prefix: "", hours: hours, now: now)
+      deviations_by_entity = self.class.event_log.events_in(hours: hours, kinds: ["deviation"], now: now)
+                                 .group_by { |event| event[:entity] }
       devices.map do |device|
         latest = self.class.event_log.latest_state(entity: device[:id])
         command = self.class.event_log.latest_command(entity: device[:id])
+        schedule = self.class.schedules.fetch(device[:id])
         {
           id: device[:id],
           name: device[:name],
@@ -267,11 +345,32 @@ module Janus
           on: latest && latest[:on],
           pending: command ? command[:status] == "pending" : false,
           last_command: serialize_last_command(command),
+          schedule: schedule && serialize_schedule(schedule),
+          adherence: serialize_adherence(schedule, deviations_by_entity[device[:id]] || [], hours, now),
           intervals: (intervals_by_entity[device[:id]] || []).map do |interval|
             { from: interval[:from].iso8601, to: interval[:to].iso8601, on: interval[:on] }
           end
         }
       end
+    end
+
+    # Expected-vs-actual adherence for one scheduled device: expected-on
+    # intervals clipped to the window (computed in local wall clock — the
+    # schedule's zone — then serialized as UTC like everything else), plus
+    # the window's deviation events as a count and tick marks. Nil when the
+    # device has no schedule.
+    def serialize_adherence(schedule, deviation_events, hours, now)
+      return nil if schedule.nil?
+
+      window_start = now - (hours * 3600)
+      expected = Schedules.expected_intervals(schedule, window_start.getlocal, now.getlocal)
+      {
+        expected: expected.map do |interval|
+          { from: interval[:from].getutc.iso8601, to: interval[:to].getutc.iso8601 }
+        end,
+        deviations: deviation_events.size,
+        marks: deviation_events.map { |event| { t: event[:observed].iso8601 } }
+      }
     end
 
     # The most recent command's shape for the dashboard, so a reload reflects
