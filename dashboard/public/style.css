@@ -63,7 +63,7 @@ body {
 .wrap {
   max-width: 1080px;
   margin: 0 auto;
-  padding: 2.75rem 2.5rem 5rem;
+  padding: 1.4rem 2.5rem 1.1rem;
 }
 
 /* ---- header ---- */
@@ -77,7 +77,7 @@ body {
 }
 
 h1 {
-  font-size: 1.7rem;
+  font-size: 1.4rem;
   font-weight: 400;
   letter-spacing: 0.01em;
 }
@@ -128,7 +128,7 @@ h1 {
 
 /* ---- modules: each home domain (climate today; more join later) ---- */
 
-.module { margin-top: 1.7rem; }
+.module { margin-top: 1rem; }
 
 .module-head {
   display: flex;
@@ -166,7 +166,7 @@ h1 {
 
 .presets .sep { margin: 0 0.55rem; }
 
-header { border-bottom: 1px solid var(--hairline); padding-bottom: 1.1rem; }
+header { border-bottom: 1px solid var(--hairline); padding-bottom: 0.7rem; }
 
 /* The module-head's working line: the cooling verdict, right-aligned into
    the head's empty space — muted text, values in ink. */
@@ -717,7 +717,7 @@ svg:focus-visible {
 /* ---- narrow screens ---- */
 
 @media (max-width: 719px) {
-  .wrap { padding: 1.8rem 1.2rem 3.5rem; }
+  .wrap { padding: 1.2rem 1.2rem 2rem; }
   .sensor, .sensor-ticks { grid-template-columns: 1fr; }
   .sensor {
     row-gap: 0.5rem;
