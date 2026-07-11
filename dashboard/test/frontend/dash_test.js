@@ -10,7 +10,7 @@ const dash = require("../../public/dash.js");
 const {
   linScale, extentOf, medianSpacing, segmentSeries, pathFor,
   minMaxIndices, tickTimes, fmtTemp, fmtHum, fmtTimeShort, fmtTick, nearestIndex,
-  withinReach,
+  withinReach, viewBoxUnits,
 } = dash;
 
 const FIXTURE_PATH = path.resolve(__dirname, "../fixtures/dashboard.json");
@@ -169,6 +169,22 @@ test("tickTimes for 720h gives weekly local-midnight ticks", () => {
     const days = Math.round((ticks[i] - ticks[i - 1]) / DAY);
     assert.strictEqual(days, 7);
   }
+});
+
+test("viewBoxUnits converts a target pixel size into viewBox units for a chart width", () => {
+  // The SVGs scale with their column: to draw a 44px-tall sparkline the
+  // viewBox height must grow as the column narrows. 960 is the viewBox width.
+  assert.strictEqual(viewBoxUnits(44, 780), 54);   // desktop column
+  assert.strictEqual(viewBoxUnits(26, 780), 32);
+  assert.strictEqual(viewBoxUnits(44, 351), 120);  // 390px phone
+  assert.strictEqual(viewBoxUnits(17, 780), 21);
+  assert.strictEqual(viewBoxUnits(44, 960), 44);   // column at viewBox scale
+});
+
+test("viewBoxUnits falls back to viewBox scale when the width is unknown", () => {
+  assert.strictEqual(viewBoxUnits(44, 0), 44);
+  assert.strictEqual(viewBoxUnits(44, undefined), 44);
+  assert.strictEqual(viewBoxUnits(26.5, null), 27); // rounds the pixel target
 });
 
 test("fmtTemp renders one decimal with a degree sign, em-dash for missing", () => {
