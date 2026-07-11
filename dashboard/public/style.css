@@ -63,7 +63,7 @@ body {
 .wrap {
   max-width: 1080px;
   margin: 0 auto;
-  padding: 1.4rem 2.5rem 1.1rem;
+  padding: 1.4rem 2.5rem 0.25rem;
 }
 
 /* ---- header ---- */
@@ -128,7 +128,7 @@ h1 {
 
 /* ---- modules: each home domain (climate today; more join later) ---- */
 
-.module { margin-top: 1rem; }
+.module { margin-top: 0.45rem; }
 
 .module-head {
   display: flex;
@@ -166,7 +166,7 @@ h1 {
 
 .presets .sep { margin: 0 0.55rem; }
 
-header { border-bottom: 1px solid var(--hairline); padding-bottom: 0.7rem; }
+header { border-bottom: 1px solid var(--hairline); padding-bottom: 0.5rem; }
 
 /* The module-head's working line: the cooling verdict, right-aligned into
    the head's empty space — muted text, values in ink. */
@@ -183,9 +183,9 @@ header { border-bottom: 1px solid var(--hairline); padding-bottom: 0.7rem; }
    charts below; the verdict sentence lives on the module-head line. */
 .cooling {
   display: grid;
-  grid-template-columns: 180px 1fr;
-  column-gap: 2rem;
-  padding: 0.5rem 0 0.55rem;
+  grid-template-columns: 200px 1fr;
+  column-gap: 1.25rem;
+  padding: 0.3rem 0 0.35rem;
   border-bottom: 1px solid var(--hairline);
 }
 
@@ -194,14 +194,16 @@ header { border-bottom: 1px solid var(--hairline); padding-bottom: 0.7rem; }
 /* ---- sensors ---- */
 
 /* Instrument rows: the whole house reads on one screen, so each sensor is a
-   slim meta column beside a tight stack of word-sized sparklines. */
+   slim meta column beside a tight stack of word-sized sparklines. dash.js
+   mirrors this geometry (200px column + 1.25rem gap, stacked under 720px) in
+   chartColumnWidth, which keeps chart heights pixel-true at any width. */
 .sensor, .sensor-ticks {
   display: grid;
-  grid-template-columns: 180px 1fr;
-  column-gap: 2rem;
+  grid-template-columns: 200px 1fr;
+  column-gap: 1.25rem;
 }
 
-.sensor { padding: 0.45rem 0 0.5rem; }
+.sensor { padding: 0.3rem 0 0.3rem; }
 
 .sensor + .sensor { border-top: 1px solid var(--hairline); }
 
@@ -274,7 +276,7 @@ header { border-bottom: 1px solid var(--hairline); padding-bottom: 0.7rem; }
   align-items: baseline;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 0.15rem;
+  margin-bottom: 0.1rem;
 }
 
 .key {
@@ -312,8 +314,8 @@ svg:focus-visible {
 .ticks {
   position: relative;
   height: 1.35em;
-  margin-top: 0.15rem;
-  font-size: 0.8rem;
+  margin-top: 0.1rem;
+  font-size: 0.75rem;
   color: var(--muted);
 }
 
@@ -331,6 +333,7 @@ svg:focus-visible {
 .datatable summary, .schededitor summary {
   color: var(--muted);
   font-size: 0.75rem;
+  line-height: 1.25;
   cursor: pointer;
   width: max-content;
   list-style: none;
@@ -407,25 +410,24 @@ svg:focus-visible {
    climate charts; the tick row reuses the same columns without a rule. */
 .device, .device-ticks {
   display: grid;
-  grid-template-columns: 180px 1fr;
-  column-gap: 2rem;
+  grid-template-columns: 200px 1fr;
+  column-gap: 1.25rem;
 }
 
 .device {
-  padding: 0.5rem 0 0.55rem;
+  padding: 0.35rem 0 0.4rem;
   align-items: center;
 }
 
-/* The meta column's head: two tight lines of type with the switch beside
-   them, so a device row reads at instrument height. */
+/* The meta column's head line: the name with the switch beside it, so a
+   device row reads at instrument height; room and state run full-width on
+   the line below. */
 .device .devhead {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.4rem;
 }
-
-.device .devlines { min-width: 0; }
 
 .device + .device { border-top: 1px solid var(--hairline); }
 
@@ -525,10 +527,7 @@ svg:focus-visible {
   .datatable[open] .tablescroll, .schededitor[open] .schedbody { animation: none; }
 }
 
-.device .staterow {
-  margin-top: 0.05rem;
-  font-size: 0.8rem;
-}
+.device .staterow { font-size: 0.8rem; }
 
 .device .state.ison { color: var(--ink); }
 
@@ -734,6 +733,9 @@ svg:focus-visible {
      to about 44px tall without moving a pixel of the visible type. */
   .presets a, .themetoggle, .datatable summary, .schededitor summary {
     position: relative;
+    /* Above the adjacent sparkline SVGs, so the invisible overlay wins the
+       hit-test over a chart drawn later in the DOM. */
+    z-index: 1;
   }
   .presets a::after, .themetoggle::after,
   .datatable summary::after, .schededitor summary::after {

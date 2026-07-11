@@ -16,6 +16,19 @@ function pointMs(p) {
   return p.tMs !== undefined ? p.tMs : Date.parse(p.t);
 }
 
+// Every chart SVG shares this viewBox width; on screen it scales to its
+// column, so vertical geometry given in viewBox units shrinks as the column
+// narrows.
+var VBW = 960;
+
+// viewBox units for a target on-screen pixel size, given the column's CSS
+// pixel width — so a "44px-tall sparkline" is 44px tall on a phone and on a
+// desktop alike. An unknown width falls back to viewBox scale (1 unit = 1px).
+function viewBoxUnits(px, widthPx) {
+  if (!widthPx || widthPx <= 0) return Math.round(px);
+  return Math.round((px * VBW) / widthPx);
+}
+
 // Linear scale from domain [d0,d1] to range [r0,r1]; also exposes .invert.
 function linScale(domain, range) {
   var d0 = domain[0], d1 = domain[1], r0 = range[0], r1 = range[1];
@@ -597,7 +610,6 @@ function nearestIndex(points, xMs) {
 if (typeof document !== "undefined") {
   (function () {
     var SVG_NS = "http://www.w3.org/2000/svg";
-    var VBW = 960;
     var PAD_X = 10;
     // Colors live in the stylesheet's custom properties (which follow the
     // prefers-color-scheme media query); read them once per render so SVG
@@ -904,6 +916,16 @@ if (typeof document !== "undefined") {
       return wrap;
     }
 
+    // The chart column's CSS width: the full container on narrow screens
+    // (where the grid stacks), else the container minus the meta column and
+    // gap. Must track the stylesheet's 200px column, 1.25rem gap, and 719px
+    // breakpoint. Feeds viewBoxUnits so chart heights hold in pixels.
+    function chartColumnWidth(container) {
+      var w = container.clientWidth;
+      if (matchMedia("(max-width: 719px)").matches) return w;
+      return w - 220;
+    }
+
     function buildTicksRow(xDomain, hours) {
       var row = el("div", "ticks");
       var ticks = tickTimes(xDomain[0], xDomain[1], hours);
@@ -951,7 +973,7 @@ if (typeof document !== "undefined") {
     // temperature and humidity sparklines. Ticks are not drawn here — the
     // module shares one tick row under its last sensor, since every chart
     // reads the same x-domain.
-    function buildSensor(sensor, xDomain, hours, openTables) {
+    function buildSensor(sensor, xDomain, hours, openTables, chartW) {
       var section = el("section", "sensor");
 
       var meta = el("div", "meta");
@@ -1005,7 +1027,9 @@ if (typeof document !== "undefined") {
       var link = { peers: [] };
       charts.appendChild(buildChart({
         points: sensor.series, key: "temp",
-        height: 54, padTop: 9, padBottom: 8, noKey: true,
+        height: viewBoxUnits(44, chartW),
+        padTop: viewBoxUnits(7.3, chartW), padBottom: viewBoxUnits(6.5, chartW),
+        noKey: true,
         color: colors.temp, unitLabel: "°F",
         xDomain: xDomain, hours: hours,
         ariaLabel: sensor.name + " temperature, " + hoursLabel(hours),
@@ -1016,7 +1040,9 @@ if (typeof document !== "undefined") {
       }));
       charts.appendChild(buildChart({
         points: sensor.series, key: "hum",
-        height: 32, padTop: 7, padBottom: 7, noKey: true,
+        height: viewBoxUnits(26, chartW),
+        padTop: viewBoxUnits(5.7, chartW), padBottom: viewBoxUnits(5.7, chartW),
+        noKey: true,
         color: colors.hum, unitLabel: "% rh",
         xDomain: xDomain, hours: hours,
         ariaLabel: sensor.name + " humidity, " + hoursLabel(hours),
@@ -1034,7 +1060,7 @@ if (typeof document !== "undefined") {
     // ticks in the module's shared tick row — every climate chart reads the
     // same x-domain. The wash between line and zero carries the sign — warm
     // red above the baseline, cool blue below.
-    function buildCoolingStrip(cooling, xDomain, hours) {
+    function buildCoolingStrip(cooling, xDomain, hours, chartW) {
       var strip = el("section", "cooling");
 
       var points = cooling.series;
@@ -1043,7 +1069,8 @@ if (typeof document !== "undefined") {
       // the latest readings; the chart draws bucket means.
       charts.appendChild(buildChart({
         points: points, key: "delta",
-        height: 54, padTop: 9, padBottom: 8,
+        height: viewBoxUnits(44, chartW),
+        padTop: viewBoxUnits(7.3, chartW), padBottom: viewBoxUnits(6.5, chartW),
         color: colors.secondary, unitLabel: "Δ °F, outside − house · bucket means",
         xDomain: xDomain, hours: hours,
         ariaLabel: "Outside minus house temperature difference, " + hoursLabel(hours),
@@ -1098,8 +1125,8 @@ if (typeof document !== "undefined") {
     // encoding chosen so absence of data never reads as "off". Crosshair,
     // tooltip, and keyboard interaction mirror the sensor charts, stepping
     // across state-change boundaries.
-    function buildStateStrip(device, xDomain, hours) {
-      var height = 20;
+    function buildStateStrip(device, xDomain, hours, chartW) {
+      var height = viewBoxUnits(17, chartW);
       var wrap = el("div", "stripwrap");
       var svg = svgEl("svg", {
         viewBox: "0 0 " + VBW + " " + height,
@@ -1140,10 +1167,10 @@ if (typeof document !== "undefined") {
         var markMs = Date.parse(marks[m].t);
         if (markMs < xDomain[0] || markMs > xDomain[1]) continue;
         svg.appendChild(svgEl("rect", {
-          x: (xs(markMs) - 1).toFixed(2),
-          y: String(height - 7),
-          width: "2",
-          height: "6",
+          x: (xs(markMs) - viewBoxUnits(0.8, chartW)).toFixed(2),
+          y: String(height - viewBoxUnits(5.8, chartW)),
+          width: String(viewBoxUnits(1.7, chartW)),
+          height: String(viewBoxUnits(5, chartW)),
           fill: colors.temp,
         }));
       }
@@ -1222,10 +1249,10 @@ if (typeof document !== "undefined") {
     // muted tone so it stays clearly subordinate to the amber actual band.
     // Sharing the x-domain makes adherence visible as alignment. No schedule
     // (or nothing expected in the window) renders nothing.
-    function buildExpectedTrack(device, xDomain) {
+    function buildExpectedTrack(device, xDomain, chartW) {
       var intervals = expectedIntervals(device.schedule, xDomain);
       if (intervals.length === 0) return null;
-      var height = 5;
+      var height = viewBoxUnits(4.2, chartW);
       var svg = svgEl("svg", {
         class: "expectedtrack",
         viewBox: "0 0 " + VBW + " " + height,
@@ -1240,7 +1267,7 @@ if (typeof document !== "undefined") {
           x: xs(intervals[i].fromMs).toFixed(2),
           y: "1",
           width: Math.max(0, xs(intervals[i].toMs) - xs(intervals[i].fromMs)).toFixed(2),
-          height: "3",
+          height: String(height - 2),
           fill: colors.muted,
           "fill-opacity": "0.12",
           stroke: colors.muted,
@@ -1491,16 +1518,17 @@ if (typeof document !== "undefined") {
       return btn;
     }
 
-    // A device reads as two tight lines (name; room and state) with the
-    // switch beside them, the schedule disclosure below, and the journal
-    // strip filling the chart column.
-    function buildDeviceRow(device, xDomain, hours) {
+    // A device reads as two tight lines — the name with the switch beside
+    // it, then room and state — with the schedule disclosure below and the
+    // journal strip filling the chart column.
+    function buildDeviceRow(device, xDomain, hours, chartW) {
       var row = el("div", "device");
 
       var meta = el("div", "meta");
       var head = el("div", "devhead");
-      var lines = el("div", "devlines");
-      lines.appendChild(el("h3", "name", device.name));
+      head.appendChild(el("h3", "name", device.name));
+      head.appendChild(buildSwitch(device));
+      meta.appendChild(head);
       var stateRow = el("div", "staterow");
       if (device.room) stateRow.appendChild(el("span", "room", device.room + " · "));
       if (device.on === null || device.on === undefined) {
@@ -1524,16 +1552,13 @@ if (typeof document !== "undefined") {
         stateRow.appendChild(el("span", "cmdfail",
           ctl.reason === "unavailable" ? " · control unavailable" : " · didn't confirm"));
       }
-      lines.appendChild(stateRow);
-      head.appendChild(lines);
-      head.appendChild(buildSwitch(device));
-      meta.appendChild(head);
+      meta.appendChild(stateRow);
       meta.appendChild(buildScheduleEditor(device));
       row.appendChild(meta);
 
       var strip = el("div", "strip");
-      strip.appendChild(buildStateStrip(device, xDomain, hours));
-      var track = buildExpectedTrack(device, xDomain);
+      strip.appendChild(buildStateStrip(device, xDomain, hours, chartW));
+      var track = buildExpectedTrack(device, xDomain, chartW);
       if (track) strip.appendChild(track);
       var deviations = device.adherence ? device.adherence.deviations : 0;
       if (deviations > 0) {
@@ -1648,8 +1673,9 @@ if (typeof document !== "undefined") {
       }
       devicesModule.hidden = false;
       devicesEl.classList.remove("stale");
+      var chartW = chartColumnWidth(devicesEl);
       for (var i = 0; i < devices.length; i++) {
-        devicesEl.appendChild(buildDeviceRow(devices[i], xDomain, hours));
+        devicesEl.appendChild(buildDeviceRow(devices[i], xDomain, hours, chartW));
       }
       // One sparse tick row for the whole module, aligned with the strips.
       var ticksRow = el("div", "device-ticks");
@@ -1707,16 +1733,17 @@ if (typeof document !== "undefined") {
         return;
       }
       renderDevices(data.devices, xDomain, data.hours);
+      var chartW = chartColumnWidth(main);
       coolingEl.textContent = "";
       if (data.cooling && data.cooling.series && data.cooling.series.length > 0) {
         renderCoolingSentence(data.cooling);
-        coolingEl.appendChild(buildCoolingStrip(data.cooling, xDomain, data.hours));
+        coolingEl.appendChild(buildCoolingStrip(data.cooling, xDomain, data.hours, chartW));
       } else {
         renderCoolingSentence(null);
       }
       coolingEl.classList.remove("stale");
       for (var i = 0; i < data.sensors.length; i++) {
-        main.appendChild(buildSensor(data.sensors[i], xDomain, data.hours, openTables));
+        main.appendChild(buildSensor(data.sensors[i], xDomain, data.hours, openTables, chartW));
       }
       // One sparse tick row for the whole climate module: every chart above
       // (ΔT strip included) shares this x-domain, so per-chart ticks would be
@@ -1832,6 +1859,20 @@ if (typeof document !== "undefined") {
       if (state.data) render(state.data);
     });
 
+    // Chart heights derive from the column's width, so a width change needs
+    // a re-render to stay pixel-true. Debounced, and height-only changes (a
+    // phone's collapsing URL bar) are ignored.
+    var lastWidth = window.innerWidth;
+    var resizeTimer = null;
+    window.addEventListener("resize", function () {
+      if (window.innerWidth === lastWidth) return;
+      lastWidth = window.innerWidth;
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(function () {
+        if (state.data) render(state.data);
+      }, 250);
+    });
+
     var param = parseInt(new URLSearchParams(location.search).get("hours"), 10);
     if ([24, 72, 168, 720].indexOf(param) !== -1) range.committed = param;
     renderPresets();
@@ -1859,6 +1900,7 @@ if (typeof module !== "undefined") {
     fmtTick: fmtTick,
     nearestIndex: nearestIndex,
     withinReach: withinReach,
+    viewBoxUnits: viewBoxUnits,
     fmtDelta: fmtDelta,
     splitAtZero: splitAtZero,
     coolingSentence: coolingSentence,
