@@ -10,6 +10,11 @@
   --temp: #a63d2f;
   --hum: #33689e;
   --lights: #8f6a00;
+  /* Wash opacities are per-theme: a tint that reads on cream disappears on
+     the dark page. --wash-opacity fills the ΔT diverging washes;
+     --unknown-opacity the strips' no-recorded-state bands. */
+  --wash-opacity: 0.1;
+  --unknown-opacity: 0.3;
 }
 
 /* Dark tokens apply in two ways — following the OS unless the user pinned
@@ -26,6 +31,8 @@
     --temp: #c4685a;
     --hum: #5b92d4;
     --lights: #ac832c;
+    --wash-opacity: 0.26;
+    --unknown-opacity: 0.5;
   }
 }
 
@@ -38,6 +45,8 @@
   --temp: #c4685a;
   --hum: #5b92d4;
   --lights: #ac832c;
+  --wash-opacity: 0.26;
+  --unknown-opacity: 0.5;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -73,6 +82,16 @@ h1 {
   letter-spacing: 0.01em;
 }
 
+/* The masthead's working line: freshness, the global range presets that
+   qualify it, and the theme control — one baseline row that wraps whole at
+   narrow widths. */
+.mastmeta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem 1.4rem;
+  flex-wrap: wrap;
+}
+
 .generated {
   color: var(--muted);
   font-size: 0.9rem;
@@ -83,10 +102,12 @@ h1 {
   font-style: italic;
 }
 
-/* Quiet text button, styled like the preset links. */
+/* Quiet text button in the presets' voice; the underline discloses that it
+   acts, in the same vocabulary as the selected preset. */
 .themetoggle {
   background: none;
   border: none;
+  border-bottom: 1px solid var(--hairline);
   padding: 0 0 1px;
   font: inherit;
   font-size: 0.9rem;
@@ -94,7 +115,10 @@ h1 {
   cursor: pointer;
 }
 
-.themetoggle:hover { color: var(--secondary); }
+.themetoggle:hover {
+  color: var(--secondary);
+  border-bottom-color: var(--muted);
+}
 
 .themetoggle:focus-visible {
   color: var(--secondary);
@@ -411,6 +435,9 @@ svg:focus-visible {
   transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
+/* The knob is made of the page itself — the same paper as the strip's
+   known-off — outlined by a hairline, never a solid disc of typography
+   color. On the amber on-track the outline hands off to the track color. */
 .device .switch .knob {
   position: absolute;
   top: 0.3rem;
@@ -418,8 +445,9 @@ svg:focus-visible {
   width: 2.05rem;
   height: 2.05rem;
   border-radius: 50%;
-  background: var(--muted);
-  transition: left 0.15s ease, background-color 0.15s ease;
+  background: var(--page);
+  border: 1px solid var(--hairline);
+  transition: left 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
 }
 
 .device .switch.on {
@@ -429,7 +457,7 @@ svg:focus-visible {
 
 .device .switch.on .knob {
   left: calc(100% - 2.05rem - 0.3rem);
-  background: var(--page);
+  border-color: var(--lights);
 }
 
 .device .switch.pending {
@@ -440,6 +468,7 @@ svg:focus-visible {
 .device .switch.pending .knob {
   left: calc(50% - 1.025rem);
   background: var(--lights);
+  border-color: var(--lights);
   animation: cmdpulse 1.1s ease-in-out infinite;
 }
 
@@ -481,7 +510,12 @@ svg:focus-visible {
 
 .device .strip, .device-ticks .strip { min-width: 0; }
 
-.device-ticks { margin-top: 0.2rem; }
+/* The row above the module's tick row gives up most of its bottom padding so
+   the ticks read as part of the strips column, matching the climate charts'
+   tick spacing rather than floating detached below the rule. */
+.device:has(+ .device-ticks) { padding-bottom: 0.3rem; }
+
+.device-ticks { margin-top: 0.15rem; }
 
 /* ---- schedules ---- */
 
@@ -658,5 +692,29 @@ svg:focus-visible {
   .device, .device-ticks {
     grid-template-columns: 1fr;
     row-gap: 0.7rem;
+  }
+
+  /* Touch targets: an invisible overlay pads each small control's tap area
+     to about 44px tall without moving a pixel of the visible type. */
+  .presets a, .themetoggle, .datatable summary, .schededitor summary {
+    position: relative;
+  }
+  .presets a::after, .themetoggle::after,
+  .datatable summary::after, .schededitor summary::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: -0.4rem;
+    right: -0.4rem;
+    height: 44px;
+    transform: translateY(-50%);
+  }
+
+  /* The strips likewise: vertical padding (cancelled by margins, so the
+     layout holds) widens the pointer target of the short on/off journal. */
+  .stripwrap svg {
+    box-sizing: content-box;
+    padding: 0.85rem 0;
+    margin: -0.85rem 0;
   }
 }
