@@ -184,12 +184,12 @@ test("fmtHum renders a rounded percentage with rh unit, em-dash for missing", ()
   assert.strictEqual(fmtHum(null), "—");
 });
 
-test("fmtTimeShort prefixes the weekday up to a week — a 24h window crosses midnight", () => {
+test("fmtTimeShort prefixes the weekday below a week — a 24h window crosses midnight", () => {
   const d = new Date(2026, 6, 7, 14, 30); // a Tuesday, local time
   assert.strictEqual(fmtTimeShort(d, 24), "Tue 2:30 pm");
   assert.strictEqual(fmtTimeShort(d, 72), "Tue 2:30 pm");
-  assert.strictEqual(fmtTimeShort(d, 168), "Tue 2:30 pm");
-  // 30 days spans repeated weekdays, so the date replaces the weekday.
+  // A full week holds two of the same weekday, so the date takes over at 168 h.
+  assert.strictEqual(fmtTimeShort(d, 168), "Jul 7, 2:30 pm");
   assert.strictEqual(fmtTimeShort(d, 720), "Jul 7, 2:30 pm");
 });
 
@@ -398,18 +398,24 @@ test("coolingSentence is null without a current differential", () => {
   assert.strictEqual(dash.coolingSentence(undefined), null);
 });
 
-test("nextTheme cycles auto to light to dark and back", () => {
+test("nextTheme pins the resolved appearance first so no step flashes the opposite", () => {
   const { nextTheme } = dash;
-  assert.strictEqual(nextTheme("auto"), "light");
-  assert.strictEqual(nextTheme("light"), "dark");
-  assert.strictEqual(nextTheme("dark"), "auto");
+  // Resolved light: auto -> light (visual no-op) -> dark -> auto.
+  assert.strictEqual(nextTheme("auto", "light"), "light");
+  assert.strictEqual(nextTheme("light", "light"), "dark");
+  assert.strictEqual(nextTheme("dark", "light"), "auto");
+  // Resolved dark: auto -> dark (visual no-op) -> light -> auto.
+  assert.strictEqual(nextTheme("auto", "dark"), "dark");
+  assert.strictEqual(nextTheme("dark", "dark"), "light");
+  assert.strictEqual(nextTheme("light", "dark"), "auto");
 });
 
-test("nextTheme treats unknown input as auto", () => {
+test("nextTheme treats unknown mode as auto and unknown scheme as light", () => {
   const { nextTheme } = dash;
-  assert.strictEqual(nextTheme("solarized"), "light");
-  assert.strictEqual(nextTheme(null), "light");
-  assert.strictEqual(nextTheme(undefined), "light");
+  assert.strictEqual(nextTheme("solarized", "dark"), "dark");
+  assert.strictEqual(nextTheme(null, "dark"), "dark");
+  assert.strictEqual(nextTheme(undefined, "light"), "light");
+  assert.strictEqual(nextTheme("auto", undefined), "light");
 });
 
 // ---- lights & outlets strip logic ----
@@ -417,7 +423,8 @@ test("nextTheme treats unknown input as auto", () => {
 const H = 3600 * 1000;
 const T0 = Date.parse("2026-07-08T00:00:00Z");
 const iso = (ms) => new Date(ms).toISOString();
-const ivl = (fromH, toH, on) => ({ from: iso(T0 + fromH * H), to: iso(T0 + toH * H), on });
+const ivl = (fromH, toH, on, clipped = false) =>
+  ({ from: iso(T0 + fromH * H), to: iso(T0 + toH * H), on, clipped });
 
 test("intervalSegments passes through intervals inside the domain", () => {
   const { intervalSegments } = dash;
@@ -469,16 +476,47 @@ test("unknownRanges is empty when segments cover the domain", () => {
 test("stateAtTime reports the covering interval and when its state began", () => {
   const { stateAtTime } = dash;
   const intervals = [ivl(2, 5, true), ivl(5, 8, false)];
-  assert.deepStrictEqual(stateAtTime(intervals, T0 + 3 * H), { on: true, sinceMs: T0 + 2 * H });
-  assert.deepStrictEqual(stateAtTime(intervals, T0 + 7 * H), { on: false, sinceMs: T0 + 5 * H });
+  assert.deepStrictEqual(stateAtTime(intervals, T0 + 3 * H),
+    { on: true, sinceMs: T0 + 2 * H, clipped: false });
+  assert.deepStrictEqual(stateAtTime(intervals, T0 + 7 * H),
+    { on: false, sinceMs: T0 + 5 * H, clipped: false });
+});
+
+test("stateAtTime carries a window-clipped start so copy can say 'before'", () => {
+  const { stateAtTime } = dash;
+  const intervals = [ivl(0, 5, true, true), ivl(5, 8, false)];
+  assert.deepStrictEqual(stateAtTime(intervals, T0 + 3 * H),
+    { on: true, sinceMs: T0, clipped: true });
+  // Intervals without the flag (older payloads) read as unclipped.
+  assert.strictEqual(stateAtTime([ivl(2, 5, true)], T0 + 3 * H).clipped, false);
 });
 
 test("stateAtTime gives the later interval at a shared boundary", () => {
   const { stateAtTime } = dash;
   const intervals = [ivl(2, 5, true), ivl(5, 8, false)];
-  assert.deepStrictEqual(stateAtTime(intervals, T0 + 5 * H), { on: false, sinceMs: T0 + 5 * H });
+  assert.deepStrictEqual(stateAtTime(intervals, T0 + 5 * H),
+    { on: false, sinceMs: T0 + 5 * H, clipped: false });
   // The closing edge of the final interval still answers.
-  assert.deepStrictEqual(stateAtTime(intervals, T0 + 8 * H), { on: false, sinceMs: T0 + 5 * H });
+  assert.deepStrictEqual(stateAtTime(intervals, T0 + 8 * H),
+    { on: false, sinceMs: T0 + 5 * H, clipped: false });
+});
+
+test("sinceLabel says 'since before' for clipped starts", () => {
+  const { sinceLabel } = dash;
+  const at = T0 + 2 * H;
+  const plain = { on: true, sinceMs: at, clipped: false };
+  const clipped = { on: true, sinceMs: at, clipped: true };
+  const time = dash.fmtTimeShort(new Date(at), 24);
+  assert.strictEqual(sinceLabel(plain, 24), "since " + time);
+  assert.strictEqual(sinceLabel(clipped, 24), "since before " + time);
+});
+
+test("heldForLabel marks a clipped duration as a floor", () => {
+  const { heldForLabel } = dash;
+  const st = { on: true, sinceMs: T0, clipped: false };
+  assert.strictEqual(heldForLabel(st, T0 + 26 * H), "for 1 d 2 h");
+  assert.strictEqual(heldForLabel({ on: true, sinceMs: T0, clipped: true }, T0 + 24 * H),
+    "for 1 d+");
 });
 
 test("stateAtTime is null outside every interval — unknown, not off", () => {
@@ -562,6 +600,93 @@ test("commandReducer fails on a transport error", () => {
   const { commandReducer } = dash;
   let s = commandReducer(null, { type: "submit", on: true, prior: "off" });
   assert.strictEqual(commandReducer(s, { type: "error" }).phase, "failed");
+});
+
+// ---- range presets: commit only on a landed fetch ----
+
+test("a requested range shows on the control but commits only when its fetch lands", () => {
+  const { rangeReducer, rangeShown } = dash;
+  let s = { committed: 24, requested: null };
+  s = rangeReducer(s, { type: "request", hours: 72 });
+  assert.strictEqual(rangeShown(s), 72, "the control may show the request optimistically");
+  assert.strictEqual(s.committed, 24, "the committed range holds until data lands");
+  s = rangeReducer(s, { type: "loaded", hours: 72 });
+  assert.deepStrictEqual(s, { committed: 72, requested: null });
+});
+
+test("a failed request reverts the control to the range actually displayed", () => {
+  const { rangeReducer, rangeShown } = dash;
+  let s = rangeReducer({ committed: 24, requested: null }, { type: "request", hours: 168 });
+  s = rangeReducer(s, { type: "failed", hours: 168 });
+  assert.deepStrictEqual(s, { committed: 24, requested: null });
+  assert.strictEqual(rangeShown(s), 24);
+});
+
+test("responses for a range no longer asked for are ignored", () => {
+  const { rangeReducer, rangeAccepts } = dash;
+  let s = { committed: 24, requested: null };
+  s = rangeReducer(s, { type: "request", hours: 72 });
+  s = rangeReducer(s, { type: "request", hours: 168 });
+  assert.strictEqual(rangeAccepts(s, 72), false, "the older request's data is stale");
+  assert.deepStrictEqual(rangeReducer(s, { type: "loaded", hours: 72 }), s);
+  assert.deepStrictEqual(rangeReducer(s, { type: "failed", hours: 72 }), s,
+    "an old failure must not clear a newer request");
+  assert.strictEqual(rangeAccepts(s, 168), true);
+  s = rangeReducer(s, { type: "loaded", hours: 168 });
+  assert.deepStrictEqual(s, { committed: 168, requested: null });
+});
+
+test("background refreshes commit only when they match the committed range", () => {
+  const { rangeReducer, rangeAccepts } = dash;
+  const idle = { committed: 24, requested: null };
+  assert.strictEqual(rangeAccepts(idle, 24), true);
+  assert.deepStrictEqual(rangeReducer(idle, { type: "loaded", hours: 24 }), idle);
+  // A refresh response arriving after a new request is stale for that request.
+  const requesting = rangeReducer(idle, { type: "request", hours: 720 });
+  assert.strictEqual(rangeAccepts(requesting, 24), false);
+});
+
+// ---- focus identity across rebuilds ----
+
+test("focus keys round-trip kind, part, and id — including awkward ids", () => {
+  const { focusKey, parseFocusKey } = dash;
+  const cases = [
+    ["sensor", "temp", "12345.67890"],
+    ["device", "switch", "hue.light.9f2c"],
+    ["device", "day-mon", "id|with|pipes"],
+    ["cooling", "delta", ""],
+  ];
+  for (const [kind, part, id] of cases) {
+    assert.deepStrictEqual(parseFocusKey(focusKey(kind, part, id)), { kind, part, id });
+  }
+});
+
+test("parseFocusKey rejects malformed keys", () => {
+  const { parseFocusKey } = dash;
+  assert.strictEqual(parseFocusKey(null), null);
+  assert.strictEqual(parseFocusKey(""), null);
+  assert.strictEqual(parseFocusKey("no-separators"), null);
+  assert.strictEqual(parseFocusKey("only|one"), null);
+});
+
+// ---- readings-table basis label ----
+
+test("bucketMinutesFor mirrors the server's bucket widths per range", () => {
+  const { bucketMinutesFor } = dash;
+  assert.strictEqual(bucketMinutesFor(24), 10);
+  assert.strictEqual(bucketMinutesFor(72), 30);
+  assert.strictEqual(bucketMinutesFor(168), 70);
+  assert.strictEqual(bucketMinutesFor(720), 300);
+});
+
+test("tableSummaryLabel names the table by its basis", () => {
+  const { tableSummaryLabel } = dash;
+  assert.strictEqual(tableSummaryLabel(10), "readings"); // 24 h buckets
+  assert.strictEqual(tableSummaryLabel(0), "readings");
+  assert.strictEqual(tableSummaryLabel(30), "bucket averages — 30 min"); // 3 d
+  assert.strictEqual(tableSummaryLabel(60), "hourly averages");
+  assert.strictEqual(tableSummaryLabel(70), "bucket averages — 70 min"); // 7 d
+  assert.strictEqual(tableSummaryLabel(300), "bucket averages — 5 h"); // 30 d
 });
 
 test("fixture matches the dashboard API contract", () => {
